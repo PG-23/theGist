@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+
+# Conda / Virtual Environments
+.env
+.venv
+env/
+
+# Data directories - transcripts and raw data should not be committed
+data/
+
+# ChromaDB persistence
+chroma/
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints/
+
+# VSCode settings
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
