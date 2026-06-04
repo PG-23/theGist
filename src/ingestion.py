@@ -179,6 +179,10 @@ def _clean_vtt(vtt_text: str) -> str:
             continue
         if re.match(r"^\d{2}:\d{2}:\d{2}", line):
             continue
+        if line.startswith("Kind:"):
+            continue
+        if line.startswith("Language:"):
+            continue
 
         # Strip HTML tags such as <c> and <i>
         line = re.sub(r"<[^>]+>", "", line).strip()
