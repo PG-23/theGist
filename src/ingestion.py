@@ -179,10 +179,6 @@ def _clean_vtt(vtt_text: str) -> str:
             continue
         if re.match(r"^\d{2}:\d{2}:\d{2}", line):
             continue
-        if line.startswith("Kind:"):
-            continue
-        if line.startswith("Language:"):
-            continue
 
         # Strip HTML tags such as <c> and <i>
         line = re.sub(r"<[^>]+>", "", line).strip()
@@ -256,6 +252,124 @@ def _transcribe_audio(url: str, output_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Public Interface
 # ---------------------------------------------------------------------------
+
+def ingest_playlist(playlist_url: str) -> dict:
+    """Ingests all videos from a YouTube playlist into the theGist pipeline.
+
+    Fetches all video URLs from the provided playlist, then runs the
+    full ingestion pipeline on each video sequentially. Videos whose
+    transcripts already exist locally are skipped automatically. Failed
+    videos are logged and excluded from the results without halting the
+    overall process.
+
+    Args:
+        playlist_url: The full YouTube playlist URL to ingest. Works
+            with any publicly accessible playlist regardless of owner,
+            including personal playlists, creator playlists, and
+            channel upload playlists.
+
+    Returns:
+        A summary dictionary containing the following keys:
+            - total: Total number of videos found in the playlist.
+            - succeeded: List of Path objects for successful transcripts.
+            - skipped: List of video titles skipped due to existing transcripts.
+            - failed: List of video URLs that failed during ingestion.
+
+    Raises:
+        ValueError: If the playlist URL is invalid or inaccessible.
+
+    Example:
+        >>> summary = ingest_playlist("https://www.youtube.com/playlist?list=...")
+        >>> print(f"Succeeded: {len(summary['succeeded'])}")
+        Succeeded: 12
+    """
+    logger.info(f"Fetching playlist metadata: {playlist_url}")
+
+    ydl_opts = {
+        "quiet": True,
+        "extract_flat": True,
+        "skip_download": True,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            playlist_info = ydl.extract_info(playlist_url, download=False)
+    except yt_dlp.utils.DownloadError as e:
+        raise ValueError(
+            f"Could not access playlist: {playlist_url}. Reason: {e}"
+        )
+
+    entries = playlist_info.get("entries", [])
+    if not entries:
+        raise ValueError(
+            f"No videos found in playlist: {playlist_url}"
+        )
+
+    total = len(entries)
+    logger.info(f"Playlist contains {total} videos. Starting ingestion...")
+
+    succeeded = []
+    skipped = []
+    failed = []
+
+    for i, entry in enumerate(entries, start=1):
+        video_url = entry.get("url") or entry.get("webpage_url")
+        video_title = entry.get("title", f"video_{i}")
+
+        if not video_url:
+            logger.warning(f"Video {i}/{total}: No URL found, skipping.")
+            failed.append(video_title)
+            continue
+
+        # Derive expected output path to check if already ingested
+        safe_title = _sanitize_filename(video_title)
+        expected_path = TRANSCRIPTS_DIR / f"{safe_title}.txt"
+
+        if expected_path.exists():
+            logger.info(
+                f"Video {i}/{total}: Already ingested, skipping — "
+                f"{video_title}"
+            )
+            skipped.append(video_title)
+            continue
+
+        logger.info(f"Video {i}/{total}: Ingesting — {video_title}")
+
+        try:
+            from src.chunking import chunk_transcript
+            from src.extraction import extract_insights
+            from src.storage import store_insights
+
+            transcript_path = ingest(video_url)
+            chunks = chunk_transcript(transcript_path)
+            insights = extract_insights(chunks, transcript_path.stem)
+            store_insights(insights, transcript_path.stem)
+            succeeded.append(transcript_path)
+            logger.info(
+                f"Video {i}/{total}: Full pipeline complete — "
+                f"{transcript_path.name} | {len(insights)} insights stored."
+            )
+        except Exception as e:
+            logger.error(
+                f"Video {i}/{total}: Failed — {video_title}. Reason: {e}"
+            )
+            failed.append(video_url)
+
+    logger.info(
+        f"Playlist ingestion complete. "
+        f"Total: {total} | "
+        f"Succeeded: {len(succeeded)} | "
+        f"Skipped: {len(skipped)} | "
+        f"Failed: {len(failed)}"
+    )
+
+    return {
+        "total": total,
+        "succeeded": succeeded,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
 
 def ingest(url: str) -> Path:
     """Ingests a YouTube video transcript into the theGist pipeline.

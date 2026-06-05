@@ -23,7 +23,7 @@ from config import (
 )
 from src.chunking import chunk_transcript
 from src.extraction import extract_insights
-from src.ingestion import ingest
+from src.ingestion import ingest, ingest_playlist
 from src.learning import evaluate_answer, generate_quiz
 from src.storage import get_all_insights, query_insights, store_insights
 
@@ -139,32 +139,64 @@ def _get_available_sources() -> list[str]:
 def _render_ingest_page() -> None:
     """Renders the transcript ingestion page.
 
-    Provides a form for submitting a YouTube URL through the full
-    theGist pipeline — ingestion, chunking, extraction, and storage.
-    Displays live progress updates and a summary of extracted insights
+    Provides two forms — one for single video ingestion and one for
+    playlist ingestion — each running the full theGist pipeline on
+    submission. Displays live progress updates and result summaries
     on completion.
     """
-    st.header("📥 Ingest a Video")
+    st.header("📥 Ingest Content")
     st.write(
-        "Paste a YouTube URL below to extract expert insights from the "
-        "video transcript and add them to your knowledge base."
+        "Add video content to your knowledge base by pasting a YouTube "
+        "URL below. Ingest a single video or an entire playlist at once."
     )
 
-    with st.form("ingest_form"):
-        url = st.text_input(
-            "YouTube URL",
-            placeholder="https://www.youtube.com/watch?v=...",
-        )
-        submitted = st.form_submit_button(
-            "Extract Insights",
-            use_container_width=True,
-            type="primary",
-        )
+    tab1, tab2 = st.tabs(["Single Video", "Playlist"])
 
-    if submitted and url.strip():
-        _run_pipeline(url.strip())
-    elif submitted:
-        st.warning("Please enter a valid YouTube URL.")
+    with tab1:
+        st.write("Paste a single YouTube video URL to extract its insights.")
+        with st.form("ingest_form"):
+            url = st.text_input(
+                "YouTube Video URL",
+                placeholder="https://www.youtube.com/watch?v=...",
+            )
+            submitted = st.form_submit_button(
+                "Extract Insights",
+                use_container_width=True,
+                type="primary",
+            )
+
+        if submitted and url.strip():
+            _run_pipeline(url.strip())
+        elif submitted:
+            st.warning("Please enter a valid YouTube URL.")
+
+    with tab2:
+        st.write(
+            "Paste a YouTube playlist URL to ingest all videos at once. "
+            "Works with your own playlists, creator playlists, and "
+            "channel upload playlists."
+        )
+        with st.form("playlist_form"):
+            playlist_url = st.text_input(
+                "YouTube Playlist URL",
+                placeholder="https://www.youtube.com/playlist?list=...",
+            )
+            st.caption(
+                "Playlist must be Public or Unlisted — Private playlists are not supported. "
+                "Each video will be fully processed including LLM insight extraction. "
+                "Videos without auto-generated captions require local Whisper transcription. "
+                "Large playlists may take a significant amount of time to complete."
+            )
+            submitted_playlist = st.form_submit_button(
+                "Ingest Playlist",
+                use_container_width=True,
+                type="primary",
+            )
+
+        if submitted_playlist and playlist_url.strip():
+            _run_playlist_pipeline(playlist_url.strip())
+        elif submitted_playlist:
+            st.warning("Please enter a valid YouTube playlist URL.")
 
 
 def _run_pipeline(url: str) -> None:
@@ -223,6 +255,75 @@ def _run_pipeline(url: str) -> None:
         progress.empty()
         st.error(f"Pipeline failed: {e}")
         logger.error(f"Pipeline error for {url}: {e}")
+
+
+def _run_playlist_pipeline(playlist_url: str) -> None:
+    """Executes the full theGist pipeline for every video in a playlist.
+
+    Fetches all video URLs from the playlist, displays a large playlist
+    warning where appropriate, then runs the full pipeline — ingestion,
+    chunking, extraction, and storage — sequentially for each video via
+    ingest_playlist. Displays a per-video progress indicator and a final
+    summary on completion.
+
+    Args:
+        playlist_url: The YouTube playlist URL to process.
+    """
+    st.info("Fetching playlist metadata...")
+
+    try:
+        import yt_dlp
+        ydl_opts = {
+            "quiet": True,
+            "extract_flat": True,
+            "skip_download": True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            playlist_info = ydl.extract_info(playlist_url, download=False)
+
+        entries = playlist_info.get("entries", [])
+        if not entries:
+            st.error("No videos found in playlist. Check the URL and try again.")
+            return
+
+        total = len(entries)
+
+        if total >= 10:
+            st.warning(
+                f"This playlist contains {total} videos. The full pipeline "
+                f"will run on each video including LLM insight extraction. "
+                f"This may take a significant amount of time. "
+                f"Keep this tab open until processing completes."
+            )
+
+        st.write(f"Found **{total} videos**. Running full pipeline on each...")
+
+        with st.spinner("Processing playlist — this may take a while..."):
+            summary = ingest_playlist(playlist_url)
+
+        st.success("Playlist pipeline complete!")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Succeeded", len(summary["succeeded"]))
+        col2.metric("Skipped", len(summary["skipped"]))
+        col3.metric("Failed", len(summary["failed"]))
+
+        if summary["skipped"]:
+            with st.expander(f"Skipped videos ({len(summary['skipped'])})"):
+                for title in summary["skipped"]:
+                    st.caption(f"⏭ {title}")
+
+        if summary["failed"]:
+            with st.expander(
+                f"Failed videos ({len(summary['failed'])})", expanded=True
+            ):
+                for title in summary["failed"]:
+                    st.caption(f"❌ {title}")
+
+    except ValueError as e:
+        st.error(f"Playlist error: {e}")
+    except Exception as e:
+        st.error(f"Unexpected error: {e}")
+        logger.error(f"Playlist pipeline error: {e}")
 
 
 # ---------------------------------------------------------------------------

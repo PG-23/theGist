@@ -30,7 +30,7 @@ from pathlib import Path
 from config import LOG_DATE_FORMAT, LOG_FORMAT, LOG_LEVEL
 from src.chunking import chunk_transcript
 from src.extraction import extract_insights
-from src.ingestion import ingest
+from src.ingestion import ingest, ingest_playlist
 from src.learning import run_quiz_session
 from src.storage import query_insights, store_insights
 
@@ -49,6 +49,62 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Pipeline Stage Commands
 # ---------------------------------------------------------------------------
+
+def cmd_playlist(args: argparse.Namespace) -> None:
+    """Ingests all videos from a YouTube playlist and runs the full pipeline.
+
+    Fetches all video URLs from the provided playlist URL and runs the
+    complete theGist pipeline — ingestion, chunking, extraction, and
+    storage — on each video sequentially. Already processed videos are
+    skipped automatically. Prints a reminder for large playlists and a
+    summary of results on completion.
+
+    Args:
+        args: Parsed argument namespace containing:
+            - url: The YouTube playlist URL to process.
+    """
+    logger.info("Running playlist ingestion...")
+
+    try:
+        # Fetch playlist metadata first to warn on large playlists
+        import yt_dlp
+        ydl_opts = {
+            "quiet": True,
+            "extract_flat": True,
+            "skip_download": True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            playlist_info = ydl.extract_info(args.url, download=False)
+
+        total = len(playlist_info.get("entries", []))
+
+        if total >= 10:
+            print(f"\nNote: This playlist contains {total} videos.")
+            print(
+                "The full pipeline will run on each video sequentially, "
+                "including LLM insight extraction. This may take a "
+                "significant amount of time for large playlists.\n"
+            )
+
+        summary = ingest_playlist(args.url)
+
+        print(f"\nPlaylist pipeline complete.")
+        print(f"  Total videos   : {summary['total']}")
+        print(f"  Succeeded      : {len(summary['succeeded'])}")
+        print(f"  Skipped        : {len(summary['skipped'])}")
+        print(f"  Failed         : {len(summary['failed'])}")
+
+        if summary["failed"]:
+            print(f"\nFailed videos:")
+            for url in summary["failed"]:
+                print(f"  - {url}")
+
+        print()
+
+    except ValueError as e:
+        print(f"\nError: {e}\n")
+        sys.exit(1)
+
 
 def cmd_ingest(args: argparse.Namespace) -> None:
     """Executes the ingestion stage for a given YouTube URL.
@@ -222,6 +278,18 @@ Examples:
         metavar="<command>",
     )
     subparsers.required = True
+
+    # playlist
+    playlist_parser = subparsers.add_parser(
+        "playlist",
+        help="Ingest all videos from a YouTube playlist.",
+    )
+    playlist_parser.add_argument(
+        "url",
+        type=str,
+        help="The YouTube playlist URL to ingest.",
+    )
+    playlist_parser.set_defaults(func=cmd_playlist)
 
     # ingest
     ingest_parser = subparsers.add_parser(
