@@ -232,6 +232,17 @@ DOMAIN_VOCABULARY: dict = {
 }
 
 # ---------------------------------------------------------------------------
+# Study Topics Settings
+# ---------------------------------------------------------------------------
+
+# Directory where study topic JSON files are persisted on disk.
+TOPICS_DIR = DATA_DIR / "topics"
+TOPICS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Default number of insights to pull when creating or refreshing a topic.
+TOPIC_INSIGHT_COUNT: int = 20
+
+# ---------------------------------------------------------------------------
 # Logging Settings
 # ---------------------------------------------------------------------------
 

@@ -2,7 +2,8 @@
 
 This module provides a multi-page web UI built with Streamlit, allowing
 users to ingest video transcripts, explore extracted insights via semantic
-search, and test their knowledge through an interactive quiz interface.
+search, manage study topics, and test their knowledge through an interactive
+quiz interface.
 
 Usage:
     streamlit run app.py
@@ -26,6 +27,13 @@ from src.extraction import extract_insights
 from src.ingestion import ingest, ingest_playlist
 from src.learning import evaluate_answer, generate_quiz
 from src.storage import get_all_insights, query_insights, store_insights
+from src.topics import (
+    create_topic,
+    delete_topic,
+    get_topic,
+    list_topics,
+    refresh_topic,
+)
 
 # ---------------------------------------------------------------------------
 # Logger Setup
@@ -95,8 +103,8 @@ def _render_sidebar() -> str:
         st.caption("Extract expert insights. Learn smarter.")
         st.divider()
 
-        pages = ["Ingest", "Explore", "Quiz"]
-        icons = ["📥", "🔍", "🧠"]
+        pages = ["Ingest", "Explore", "Topics", "Quiz"]
+        icons = ["📥", "🔍", "📚", "🧠"]
 
         for page, icon in zip(pages, icons):
             is_active = st.session_state.current_page == page
@@ -403,6 +411,177 @@ def _render_explore_page() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Page: Topics
+# ---------------------------------------------------------------------------
+
+def _render_topics_page() -> None:
+    """Renders the study topics management page.
+
+    Provides controls for creating new study topics, browsing existing
+    topics, viewing aggregated insights per topic, refreshing topics
+    as new content is added, and deleting topics no longer needed.
+    """
+    st.header("📚 Study Topics")
+    st.write(
+        "Create curated study topics that aggregate related insights "
+        "from across all your ingested videos into one focused collection."
+    )
+
+    tab1, tab2 = st.tabs(["Browse Topics", "Create Topic"])
+
+    # -----------------------------------------------------------------------
+    # Tab 1 — Browse existing topics
+    # -----------------------------------------------------------------------
+    with tab1:
+        topics = list_topics()
+
+        if not topics:
+            st.info(
+                "No study topics yet. Go to the **Create Topic** tab "
+                "to build your first one."
+            )
+        else:
+            st.caption(f"{len(topics)} topic(s) saved")
+
+            for topic in topics:
+                with st.container(border=True):
+                    col1, col2 = st.columns([4, 1])
+
+                    with col1:
+                        st.subheader(topic["name"])
+                        st.caption(f"Query: *{topic['query']}*")
+                        if topic.get("source_filter"):
+                            st.caption(
+                                f"Source filter: "
+                                f"{topic['source_filter'].replace('_', ' ')}"
+                            )
+                        st.caption(
+                            f"{topic['insight_count']} insights · "
+                            f"Refreshed: "
+                            f"{topic['refreshed_at'][:10]}"
+                        )
+
+                    with col2:
+                        if st.button(
+                            "🔄 Refresh",
+                            key=f"refresh_{topic['name']}",
+                            use_container_width=True,
+                        ):
+                            try:
+                                updated = refresh_topic(topic["name"])
+                                st.success(
+                                    f"Refreshed with "
+                                    f"{updated['insight_count']} insights."
+                                )
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Refresh failed: {e}")
+
+                        if st.button(
+                            "🗑 Delete",
+                            key=f"delete_{topic['name']}",
+                            use_container_width=True,
+                        ):
+                            try:
+                                delete_topic(topic["name"])
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Delete failed: {e}")
+
+                    with st.expander(
+                        f"View {topic['insight_count']} insights",
+                        expanded=False,
+                    ):
+                        try:
+                            full_topic = get_topic(topic["name"])
+                            for i, result in enumerate(
+                                full_topic["insights"], start=1
+                            ):
+                                st.write(f"**{i}.** {result['insight']}")
+                                col_a, col_b = st.columns([3, 1])
+                                col_a.caption(
+                                    f"Source: "
+                                    f"{result['source'].replace('_', ' ')}"
+                                )
+                                col_b.caption(
+                                    f"Similarity: "
+                                    f"{round((1 - result['distance']) * 100, 1)}%"
+                                )
+                        except Exception as e:
+                            st.error(f"Could not load insights: {e}")
+
+    # -----------------------------------------------------------------------
+    # Tab 2 — Create a new topic
+    # -----------------------------------------------------------------------
+    with tab2:
+        st.write(
+            "Define a topic by giving it a name and a query. "
+            "theGist will search your knowledge base and pull the most "
+            "relevant insights from across all your ingested videos."
+        )
+
+        sources = _get_available_sources()
+
+        with st.form("create_topic_form"):
+            topic_name = st.text_input(
+                "Topic name",
+                placeholder="e.g. Celts early game strategy",
+            )
+            topic_query = st.text_input(
+                "Search query",
+                placeholder=(
+                    "e.g. Celts feudal age rush build order and early aggression"
+                ),
+            )
+            source_filter = st.selectbox(
+                "Filter by source (optional)",
+                options=["All sources"] + sources,
+            )
+            insight_count = st.slider(
+                "Number of insights to include",
+                min_value=5,
+                max_value=30,
+                value=20,
+            )
+            submitted = st.form_submit_button(
+                "Create Topic",
+                use_container_width=True,
+                type="primary",
+            )
+
+        if submitted:
+            if not topic_name.strip():
+                st.warning("Please enter a topic name.")
+            elif not topic_query.strip():
+                st.warning("Please enter a search query.")
+            else:
+                source = (
+                    None if source_filter == "All sources"
+                    else source_filter
+                )
+                try:
+                    topic = create_topic(
+                        name=topic_name.strip(),
+                        query=topic_query.strip(),
+                        source_name=source,
+                        insight_count=insight_count,
+                    )
+                    st.success(
+                        f"Topic **{topic['name']}** created with "
+                        f"{topic['insight_count']} insights."
+                    )
+                    st.caption(
+                        "Switch to the Browse Topics tab to view "
+                        "and manage your new topic."
+                    )
+                except ValueError as e:
+                    st.error(f"Could not create topic: {e}")
+                except Exception as e:
+                    st.error(f"Unexpected error: {e}")
+                    logger.error(f"Topic creation error: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Page: Quiz
 # ---------------------------------------------------------------------------
 
@@ -427,7 +606,6 @@ def _render_quiz_page() -> None:
         )
         return
 
-    # Quiz setup — only shown when no active quiz session
     if not st.session_state.quiz_active:
         with st.form("quiz_setup_form"):
             source = st.selectbox("Select a source to quiz on", options=sources)
@@ -460,18 +638,15 @@ def _render_quiz_page() -> None:
                 except ValueError as e:
                     st.error(f"Quiz error: {e}")
 
-    # Active quiz session
     elif st.session_state.quiz_active:
         questions = st.session_state.quiz_questions
         idx = st.session_state.quiz_index
         total = len(questions)
 
-        # Quiz complete
         if idx >= total:
             _render_quiz_summary()
             return
 
-        # Progress indicator
         st.progress(idx / total, text=f"Question {idx + 1} of {total}")
 
         question = questions[idx]
@@ -545,7 +720,6 @@ def _render_quiz_summary() -> None:
     else:
         st.warning("Keep practicing! Try ingesting more videos on this topic to build depth.")
 
-    # Results breakdown
     with st.expander("Review your answers", expanded=False):
         for i, result in enumerate(st.session_state.quiz_results, start=1):
             icon = "✅" if result["correct"] else "❌"
@@ -581,6 +755,8 @@ def main() -> None:
         _render_ingest_page()
     elif page == "Explore":
         _render_explore_page()
+    elif page == "Topics":
+        _render_topics_page()
     elif page == "Quiz":
         _render_quiz_page()
 

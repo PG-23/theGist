@@ -33,6 +33,12 @@ from src.extraction import extract_insights
 from src.ingestion import ingest, ingest_playlist
 from src.learning import run_quiz_session
 from src.storage import query_insights, store_insights
+from src.topics import (
+    create_topic,
+    delete_topic,
+    list_topics,
+    refresh_topic,
+)
 
 # ---------------------------------------------------------------------------
 # Logger Setup
@@ -49,6 +55,81 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Pipeline Stage Commands
 # ---------------------------------------------------------------------------
+
+def cmd_topic(args: argparse.Namespace) -> None:
+    """Manages study topics from the command line.
+
+    Supports creating, listing, refreshing, and deleting study topics
+    via subactions passed as arguments.
+
+    Args:
+        args: Parsed argument namespace containing:
+            - action: One of 'create', 'list', 'refresh', or 'delete'.
+            - name: Topic name (required for create, refresh, delete).
+            - query: Search query (required for create).
+            - source: Optional source filter (used with create).
+    """
+    action = args.action
+
+    if action == "list":
+        topics = list_topics()
+        if not topics:
+            print("\nNo study topics found. Create one with:")
+            print(
+                "  python main.py topic create "
+                "\"<name>\" \"<query>\"\n"
+            )
+            return
+        print(f"\n{'='*60}")
+        print(f"  Study Topics ({len(topics)})")
+        print(f"{'='*60}")
+        for t in topics:
+            print(f"\n  {t['name']}")
+            print(f"  Query    : {t['query']}")
+            print(f"  Insights : {t['insight_count']}")
+            print(f"  Refreshed: {t['refreshed_at'][:10]}")
+        print()
+
+    elif action == "create":
+        if not args.name or not args.query:
+            print("\nError: --name and --query are required for create.\n")
+            sys.exit(1)
+        try:
+            topic = create_topic(
+                name=args.name,
+                query=args.query,
+                source_name=getattr(args, "source", None),
+            )
+            print(f"\nTopic created: '{topic['name']}'")
+            print(f"Insights     : {topic['insight_count']}")
+            print(f"Query        : {topic['query']}\n")
+        except ValueError as e:
+            print(f"\nError: {e}\n")
+            sys.exit(1)
+
+    elif action == "refresh":
+        if not args.name:
+            print("\nError: --name is required for refresh.\n")
+            sys.exit(1)
+        try:
+            topic = refresh_topic(args.name)
+            print(f"\nTopic refreshed: '{topic['name']}'")
+            print(f"Insights       : {topic['insight_count']}\n")
+        except FileNotFoundError as e:
+            print(f"\nError: {e}\n")
+            sys.exit(1)
+
+    elif action == "delete":
+        if not args.name:
+            print("\nError: --name is required for delete.\n")
+            sys.exit(1)
+        try:
+            delete_topic(args.name)
+            print(f"\nTopic deleted: '{args.name}'\n")
+        except FileNotFoundError as e:
+            print(f"\nError: {e}\n")
+            sys.exit(1)
+
 
 def cmd_playlist(args: argparse.Namespace) -> None:
     """Ingests all videos from a YouTube playlist and runs the full pipeline.
@@ -278,6 +359,36 @@ Examples:
         metavar="<command>",
     )
     subparsers.required = True
+
+    # topic
+    topic_parser = subparsers.add_parser(
+        "topic",
+        help="Create and manage study topics.",
+    )
+    topic_parser.add_argument(
+        "action",
+        choices=["create", "list", "refresh", "delete"],
+        help="Action to perform on topics.",
+    )
+    topic_parser.add_argument(
+        "--name",
+        type=str,
+        default=None,
+        help="Topic name (required for create, refresh, delete).",
+    )
+    topic_parser.add_argument(
+        "--query",
+        type=str,
+        default=None,
+        help="Search query for topic creation.",
+    )
+    topic_parser.add_argument(
+        "--source",
+        type=str,
+        default=None,
+        help="Optional source filter for topic creation.",
+    )
+    topic_parser.set_defaults(func=cmd_topic)
 
     # playlist
     playlist_parser = subparsers.add_parser(
