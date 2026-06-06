@@ -126,6 +126,18 @@ ACTIVE_DOMAIN: str | None = "aoe2"
 # Set to False to re-enable Whisper transcription for caption-less videos.
 CAPTIONS_ONLY: bool = True
 
+# Controls Whisper vocabulary biasing (Option 2).
+# When enabled, passes domain vocabulary as an initial prompt to Whisper
+# to improve recognition of domain specific terminology during transcription.
+# Only applies when CAPTIONS_ONLY is False.
+WHISPER_DOMAIN_PROMPT_ENABLED: bool = True
+
+# Controls the LLM transcript correction pass (Option 3).
+# When enabled, runs a post-transcription correction pass using the local
+# LLM to fix misrecognized domain specific terms. Disable if correction
+# introduces more errors than it resolves.
+TRANSCRIPT_CORRECTION_ENABLED: bool = False
+
 # Pre-defined domain vocabulary libraries.
 # Each domain maps to a dictionary containing:
 #   - "name": Human readable display name for the domain
