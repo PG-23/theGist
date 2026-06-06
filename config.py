@@ -111,6 +111,115 @@ QUIZ_QUESTION_COUNT = 10
 QUIZ_CHOICES_COUNT = 4
 
 # ---------------------------------------------------------------------------
+# Domain Adaptation Settings
+# ---------------------------------------------------------------------------
+
+# The active domain for transcript correction and vocabulary biasing.
+# Set to a key from DOMAIN_VOCABULARY to enable domain specific adaptation,
+# or None to disable domain adaptation entirely.
+# Example: ACTIVE_DOMAIN = "aoe2"
+ACTIVE_DOMAIN: str | None = "aoe2"
+
+# Controls whether videos without auto-generated captions are skipped.
+# When True, videos without captions are skipped rather than falling back
+# to local Whisper transcription. Recommended for best insight quality.
+# Set to False to re-enable Whisper transcription for caption-less videos.
+CAPTIONS_ONLY: bool = True
+
+# Pre-defined domain vocabulary libraries.
+# Each domain maps to a dictionary containing:
+#   - "name": Human readable display name for the domain
+#   - "vocabulary": List of domain specific terms for Whisper prompt biasing
+#   - "correction_prompt": Instructions for the LLM correction pass
+DOMAIN_VOCABULARY: dict = {
+    "aoe2": {
+        "name": "Age of Empires 2",
+        "vocabulary": [
+            # Civilizations
+            "Celts", "Britons", "Franks", "Teutons", "Cumans", "Lithuanians",
+            "Koreans", "Mongols", "Aztecs", "Vikings", "Saracens", "Persians",
+            "Chinese", "Japanese", "Byzantines", "Goths", "Huns", "Mayans",
+            "Spanish", "Turks", "Berbers", "Malians", "Portuguese", "Italians",
+            "Slavs", "Bulgarians", "Tatars", "Khmer", "Malay", "Burmese",
+            "Vietnamese", "Incas", "Indians", "Romans",
+            # Units
+            "men-at-arms", "halberdier", "spearman", "pikeman", "militia",
+            "arbalest", "crossbowman", "skirmisher", "cavalry archer",
+            "heavy cavalry archer", "knight", "cavalier", "paladin",
+            "hussar", "light cavalry", "scout cavalry", "camel rider",
+            "battle elephant", "war elephant", "trebuchet", "mangonel",
+            "onager", "siege onager", "scorpion", "bombardment cannon",
+            "monk", "missionary", "trade cart", "villager", "galley",
+            "war galley", "demolition ship", "fire ship", "longboat",
+            "cannon galleon", "petard",
+            # Strategies and terminology
+            "fast castle", "feudal age", "castle age", "imperial age",
+            "dark age", "build order", "boom", "all-in", "flush",
+            "scout rush", "men-at-arms rush", "archer rush", "tower rush",
+            "drush", "forward base", "forward castle", "relics",
+            "town center", "market", "blacksmith", "stable", "barracks",
+            "archery range", "siege workshop", "university", "monastery",
+            "castle", "wonder", "loom", "double-bit axe", "horse collar",
+            "wheelbarrow", "hand cart", "bloodlines", "husbandry",
+            "thumb ring", "ballistics", "chemistry", "murder holes",
+            "heated shot", "bracer", "plate barding armor",
+            # Maps and game modes
+            "Arabia", "Black Forest", "Islands", "Arena", "Hideout",
+            "Nomad", "Gold Rush", "Team Islands", "Migration",
+            "random map", "death match", "regicide", "treaty",
+            # Common commentary phrases
+            "micro", "macro", "eco", "economy", "pop cap", "population",
+            "food", "wood", "gold", "stone", "resources", "villagers",
+            "idle time", "scouting", "walling", "palisade", "stone wall",
+            "garrison", "patrol", "stance", "aggressive", "defensive",
+        ],
+        "correction_prompt": (
+            "The following is an auto-generated transcript from an "
+            "Age of Empires 2 video commentary. Correct any misrecognized "
+            "game-specific terms including civilization names such as Celts, "
+            "Cumans, Britons, Teutons and Lithuanians, unit names such as "
+            "halberdier, arbalest, mangonel and trebuchet, and strategy "
+            "terms such as fast castle, feudal age, build order and boom. "
+            "Do not change the meaning, add information, or alter anything "
+            "that is already correct. Return only the corrected transcript "
+            "with no explanation or preamble."
+        ),
+    },
+    "computer_science": {
+        "name": "Computer Science",
+        "vocabulary": [
+            # Languages and frameworks
+            "Python", "JavaScript", "TypeScript", "Rust", "Go", "Kotlin",
+            "React", "Vue", "Angular", "Node.js", "Django", "FastAPI",
+            "PyTorch", "TensorFlow", "Kubernetes", "Docker", "GraphQL",
+            # Concepts
+            "algorithm", "data structure", "binary tree", "hash map",
+            "recursion", "dynamic programming", "big O notation",
+            "asynchronous", "concurrency", "parallelism", "mutex",
+            "deadlock", "race condition", "garbage collection",
+            "heap", "stack", "queue", "linked list",
+            # Infrastructure
+            "API", "REST", "microservices", "monolith", "serverless",
+            "CI/CD", "DevOps", "pipeline", "containerization",
+            "load balancer", "cache", "CDN", "latency", "throughput",
+            # ML and AI
+            "neural network", "transformer", "embedding", "fine-tuning",
+            "inference", "tokenizer", "gradient descent", "backpropagation",
+            "overfitting", "regularization", "hyperparameter",
+        ],
+        "correction_prompt": (
+            "The following is an auto-generated transcript from a computer "
+            "science video or lecture. Correct any misrecognized technical "
+            "terms including programming languages, framework names, "
+            "algorithm names, and computer science concepts. "
+            "Do not change the meaning, add information, or alter anything "
+            "that is already correct. Return only the corrected transcript "
+            "with no explanation or preamble."
+        ),
+    },
+}
+
+# ---------------------------------------------------------------------------
 # Logging Settings
 # ---------------------------------------------------------------------------
 

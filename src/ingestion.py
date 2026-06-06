@@ -20,6 +20,7 @@ import whisper
 import yt_dlp
 
 from config import (
+    CAPTIONS_ONLY,
     TRANSCRIPTS_DIR,
     WHISPER_LANGUAGE,
     WHISPER_MODEL,
@@ -27,6 +28,7 @@ from config import (
     LOG_DATE_FORMAT,
     LOG_LEVEL,
 )
+from src.correction import correct_transcript, get_whisper_prompt
 
 # ---------------------------------------------------------------------------
 # Logger Setup
@@ -237,9 +239,14 @@ def _transcribe_audio(url: str, output_path: Path) -> None:
 
         try:
             model = whisper.load_model(WHISPER_MODEL)
+            whisper_prompt = get_whisper_prompt()
             result = model.transcribe(
                 str(audio_path),
                 language=WHISPER_LANGUAGE,
+                initial_prompt=whisper_prompt,
+                condition_on_previous_text=False,
+                no_speech_threshold=0.6,
+                logprob_threshold=-1.0,
                 verbose=False,
             )
             transcript = result["text"].strip()
@@ -418,8 +425,26 @@ def ingest(url: str) -> Path:
     # Attempt fast path: fetch existing auto-generated transcript
     success = _fetch_transcript(url, output_path)
 
-    # Fall back to Whisper transcription if no transcript was available
+    # Handle case where no captions were found
     if not success:
-        _transcribe_audio(url, output_path)
+        if CAPTIONS_ONLY:
+            logger.warning(
+                f"No captions found for: {title}. "
+                f"Skipping — set CAPTIONS_ONLY=False in config.py "
+                f"to enable Whisper transcription fallback."
+            )
+            raise ValueError(
+                f"No auto-generated captions available for: '{title}'. "
+                f"Choose a video with captions enabled for best quality."
+            )
+        else:
+            _transcribe_audio(url, output_path)
+
+    # Apply domain adaptive correction pass to improve terminology accuracy
+    raw = output_path.read_text(encoding="utf-8")
+    corrected = correct_transcript(raw)
+    if corrected != raw:
+        output_path.write_text(corrected, encoding="utf-8")
+        logger.info("Transcript updated with domain correction pass.")
 
     return output_path
