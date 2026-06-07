@@ -1,34 +1,28 @@
-"""Transcript ingestion module for theGist pipeline.
+"""Transcript ingestion module for theGist application.
 
 This module handles retrieving transcripts from YouTube videos using yt-dlp.
-It first attempts to fetch an existing auto-generated transcript directly,
-falling back to downloading the audio and transcribing it locally via Whisper
-if no transcript is available.
+Only videos with auto-generated captions are supported. Videos without
+captions are skipped with a clear error message.
 
 Typical usage:
-    >>> from ingestion import ingest
+    >>> from src.ingestion import ingest, ingest_playlist
     >>> transcript_path = ingest("https://www.youtube.com/watch?v=example")
 """
 
 import logging
 import re
-import subprocess
-import tempfile
 from pathlib import Path
 
-import whisper
 import yt_dlp
 
 from config import (
     CAPTIONS_ONLY,
+    LOG_DATE_FORMAT,
+    LOG_FORMAT,
+    LOG_LEVEL,
     TRANSCRIPTS_DIR,
     WHISPER_LANGUAGE,
-    WHISPER_MODEL,
-    LOG_FORMAT,
-    LOG_DATE_FORMAT,
-    LOG_LEVEL,
 )
-from src.correction import correct_transcript, get_whisper_prompt
 
 # ---------------------------------------------------------------------------
 # Logger Setup
@@ -76,7 +70,7 @@ def _fetch_video_metadata(url: str) -> dict:
 
     Returns:
         A dictionary containing video metadata fields including
-        'title', 'id', and 'subtitles'.
+        'title', 'id', 'uploader', and 'subtitles'.
 
     Raises:
         ValueError: If the URL is invalid or the video is unavailable.
@@ -131,17 +125,15 @@ def _fetch_transcript(url: str, output_path: Path) -> bool:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-        # yt-dlp saves subtitles with a language suffix e.g. filename.en.vtt
         vtt_file = output_path.with_suffix(f".{WHISPER_LANGUAGE}.vtt")
         if not vtt_file.exists():
             logger.info("No auto-generated transcript found for video.")
             return False
 
-        # Strip VTT formatting tags and write clean plain text
         raw = vtt_file.read_text(encoding="utf-8")
         clean = _clean_vtt(raw)
         output_path.write_text(clean, encoding="utf-8")
-        vtt_file.unlink()  # Remove the intermediate VTT file
+        vtt_file.unlink()
 
         logger.info(f"Transcript fetched successfully: {output_path.name}")
         return True
@@ -174,18 +166,19 @@ def _clean_vtt(vtt_text: str) -> str:
     seen = set()
 
     for line in lines:
-        # Skip VTT header, blank lines, and timestamp lines
         if not line.strip():
             continue
         if line.startswith("WEBVTT"):
             continue
+        if line.startswith("Kind:"):
+            continue
+        if line.startswith("Language:"):
+            continue
         if re.match(r"^\d{2}:\d{2}:\d{2}", line):
             continue
 
-        # Strip HTML tags such as <c> and <i>
         line = re.sub(r"<[^>]+>", "", line).strip()
 
-        # Skip empty lines and duplicates from overlapping cues
         if line and line not in seen:
             seen.add(line)
             cleaned.append(line)
@@ -193,94 +186,92 @@ def _clean_vtt(vtt_text: str) -> str:
     return " ".join(cleaned)
 
 
-def _transcribe_audio(url: str, output_path: Path) -> None:
-    """Downloads audio and transcribes it locally using Whisper.
-
-    Used as a fallback when no auto-generated transcript is available.
-    Downloads the best available audio stream, runs it through the local
-    Whisper model, and saves the resulting transcript as plain text.
-
-    Args:
-        url: The full YouTube video URL to download audio from.
-        output_path: The Path where the transcript text file will be saved.
-
-    Raises:
-        RuntimeError: If the audio download or Whisper transcription fails.
-
-    Example:
-        >>> _transcribe_audio(
-        ...     "https://www.youtube.com/watch?v=example",
-        ...     Path("data/transcripts/example.txt")
-        ... )
-    """
-    logger.info("Falling back to Whisper transcription. Downloading audio...")
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        audio_path = Path(tmp_dir) / "audio.mp3"
-
-        ydl_opts = {
-            "quiet": True,
-            "format": "bestaudio/best",
-            "outtmpl": str(audio_path.with_suffix("")),
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }],
-        }
-
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-        except Exception as e:
-            raise RuntimeError(f"Audio download failed: {e}")
-
-        logger.info(f"Audio downloaded. Running Whisper ({WHISPER_MODEL}) transcription...")
-
-        try:
-            model = whisper.load_model(WHISPER_MODEL)
-            whisper_prompt = get_whisper_prompt()
-            result = model.transcribe(
-                str(audio_path),
-                language=WHISPER_LANGUAGE,
-                initial_prompt=whisper_prompt,
-                condition_on_previous_text=False,
-                no_speech_threshold=0.6,
-                logprob_threshold=-1.0,
-                verbose=False,
-            )
-            transcript = result["text"].strip()
-            output_path.write_text(transcript, encoding="utf-8")
-            logger.info(f"Whisper transcription complete: {output_path.name}")
-        except Exception as e:
-            raise RuntimeError(f"Whisper transcription failed: {e}")
-
-
 # ---------------------------------------------------------------------------
 # Public Interface
 # ---------------------------------------------------------------------------
 
-def ingest_playlist(playlist_url: str) -> dict:
-    """Ingests all videos from a YouTube playlist into the theGist pipeline.
+def ingest(url: str) -> tuple[Path, dict]:
+    """Ingests a YouTube video transcript into theGist.
 
-    Fetches all video URLs from the provided playlist, then runs the
-    full ingestion pipeline on each video sequentially. Videos whose
-    transcripts already exist locally are skipped automatically. Failed
-    videos are logged and excluded from the results without halting the
-    overall process.
+    Retrieves the transcript for the given YouTube video URL using
+    auto-generated captions only. Saves the transcript as a plain
+    text file and returns both the file path and video metadata
+    for use in record creation.
+
+    Args:
+        url: The full YouTube video URL to ingest. Must be a publicly
+            accessible video with auto-generated captions enabled.
+
+    Returns:
+        A tuple containing:
+            - Path: The path to the saved transcript text file.
+            - dict: Video metadata including title, uploader, and url.
+
+    Raises:
+        ValueError: If the URL is invalid, the video is unavailable,
+            or no auto-generated captions exist and CAPTIONS_ONLY
+            is True.
+
+    Example:
+        >>> path, meta = ingest("https://www.youtube.com/watch?v=example")
+        >>> print(meta["title"])
+        'Example Video Title'
+    """
+    logger.info(f"Starting ingestion for: {url}")
+
+    metadata = _fetch_video_metadata(url)
+    title = metadata.get("title", metadata.get("id", "unknown_video"))
+    uploader = metadata.get("uploader", "Unknown Channel")
+    safe_title = _sanitize_filename(title)
+    output_path = TRANSCRIPTS_DIR / f"{safe_title}.txt"
+
+    if output_path.exists():
+        logger.info(f"Transcript already exists, skipping download: {output_path.name}")
+        return output_path, {
+            "title": title,
+            "uploader": uploader,
+            "url": url,
+        }
+
+    success = _fetch_transcript(url, output_path)
+
+    if not success:
+        if CAPTIONS_ONLY:
+            logger.warning(
+                f"No captions found for: {title}. "
+                f"Skipping — set CAPTIONS_ONLY=False in config.py "
+                f"to enable Whisper transcription fallback."
+            )
+            raise ValueError(
+                f"No auto-generated captions available for: '{title}'. "
+                f"Choose a video with captions enabled for best quality."
+            )
+
+    return output_path, {
+        "title": title,
+        "uploader": uploader,
+        "url": url,
+    }
+
+
+def ingest_playlist(playlist_url: str) -> dict:
+    """Ingests all caption-enabled videos from a YouTube playlist.
+
+    Fetches all video URLs from the provided playlist, then runs
+    ingestion on each video sequentially. Videos without captions
+    are counted as failed and skipped automatically.
 
     Args:
         playlist_url: The full YouTube playlist URL to ingest. Works
-            with any publicly accessible playlist regardless of owner,
-            including personal playlists, creator playlists, and
-            channel upload playlists.
+            with any publicly accessible playlist regardless of owner.
 
     Returns:
         A summary dictionary containing the following keys:
             - total: Total number of videos found in the playlist.
-            - succeeded: List of Path objects for successful transcripts.
-            - skipped: List of video titles skipped due to existing transcripts.
-            - failed: List of video URLs that failed during ingestion.
+            - succeeded: List of tuples (Path, metadata dict) for
+              successful ingestions.
+            - skipped: List of video titles skipped as already ingested.
+            - failed: List of video titles that failed or had no captions.
 
     Raises:
         ValueError: If the playlist URL is invalid or inaccessible.
@@ -308,9 +299,7 @@ def ingest_playlist(playlist_url: str) -> dict:
 
     entries = playlist_info.get("entries", [])
     if not entries:
-        raise ValueError(
-            f"No videos found in playlist: {playlist_url}"
-        )
+        raise ValueError(f"No videos found in playlist: {playlist_url}")
 
     total = len(entries)
     logger.info(f"Playlist contains {total} videos. Starting ingestion...")
@@ -328,7 +317,6 @@ def ingest_playlist(playlist_url: str) -> dict:
             failed.append(video_title)
             continue
 
-        # Derive expected output path to check if already ingested
         safe_title = _sanitize_filename(video_title)
         expected_path = TRANSCRIPTS_DIR / f"{safe_title}.txt"
 
@@ -343,24 +331,14 @@ def ingest_playlist(playlist_url: str) -> dict:
         logger.info(f"Video {i}/{total}: Ingesting — {video_title}")
 
         try:
-            from src.chunking import chunk_transcript
-            from src.extraction import extract_insights
-            from src.storage import store_insights
-
-            transcript_path = ingest(video_url)
-            chunks = chunk_transcript(transcript_path)
-            insights = extract_insights(chunks, transcript_path.stem)
-            store_insights(insights, transcript_path.stem)
-            succeeded.append(transcript_path)
-            logger.info(
-                f"Video {i}/{total}: Full pipeline complete — "
-                f"{transcript_path.name} | {len(insights)} insights stored."
-            )
+            result = ingest(video_url)
+            succeeded.append(result)
+            logger.info(f"Video {i}/{total}: Success — {video_title}")
         except Exception as e:
             logger.error(
                 f"Video {i}/{total}: Failed — {video_title}. Reason: {e}"
             )
-            failed.append(video_url)
+            failed.append(video_title)
 
     logger.info(
         f"Playlist ingestion complete. "
@@ -376,75 +354,3 @@ def ingest_playlist(playlist_url: str) -> dict:
         "skipped": skipped,
         "failed": failed,
     }
-
-
-def ingest(url: str) -> Path:
-    """Ingests a YouTube video transcript into the theGist pipeline.
-
-    Retrieves the transcript for the given YouTube video URL by first
-    attempting to fetch the auto-generated subtitle file via yt-dlp.
-    If no subtitle is available, falls back to downloading the audio
-    and transcribing it locally using Whisper.
-
-    The resulting transcript is saved as a plain text file in the
-    configured transcripts directory defined in config.py.
-
-    Args:
-        url: The full YouTube video URL to ingest. Must be a publicly
-            accessible video with either auto-generated captions or
-            accessible audio.
-
-    Returns:
-        A Path object pointing to the saved transcript text file.
-
-    Raises:
-        ValueError: If the provided URL is invalid or the video is
-            unavailable.
-        RuntimeError: If both transcript fetching and Whisper
-            transcription fail.
-
-    Example:
-        >>> from ingestion import ingest
-        >>> path = ingest("https://www.youtube.com/watch?v=example")
-        >>> print(path)
-        data/transcripts/Example_Video_Title.txt
-    """
-    logger.info(f"Starting ingestion for: {url}")
-
-    # Retrieve video metadata to build a meaningful output filename
-    metadata = _fetch_video_metadata(url)
-    title = metadata.get("title", metadata.get("id", "unknown_video"))
-    safe_title = _sanitize_filename(title)
-    output_path = TRANSCRIPTS_DIR / f"{safe_title}.txt"
-
-    # Skip ingestion if transcript already exists locally
-    if output_path.exists():
-        logger.info(f"Transcript already exists, skipping download: {output_path.name}")
-        return output_path
-
-    # Attempt fast path: fetch existing auto-generated transcript
-    success = _fetch_transcript(url, output_path)
-
-    # Handle case where no captions were found
-    if not success:
-        if CAPTIONS_ONLY:
-            logger.warning(
-                f"No captions found for: {title}. "
-                f"Skipping — set CAPTIONS_ONLY=False in config.py "
-                f"to enable Whisper transcription fallback."
-            )
-            raise ValueError(
-                f"No auto-generated captions available for: '{title}'. "
-                f"Choose a video with captions enabled for best quality."
-            )
-        else:
-            _transcribe_audio(url, output_path)
-
-    # Apply domain adaptive correction pass to improve terminology accuracy
-    raw = output_path.read_text(encoding="utf-8")
-    corrected = correct_transcript(raw)
-    if corrected != raw:
-        output_path.write_text(corrected, encoding="utf-8")
-        logger.info("Transcript updated with domain correction pass.")
-
-    return output_path
