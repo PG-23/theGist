@@ -5,6 +5,9 @@ __pycache__/
 .Python
 *.egg-info/
 
+# Package build artifacts
+thegist.egg-info/
+
 # Conda / Virtual Environments
 .env
 .venv
