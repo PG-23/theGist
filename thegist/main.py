@@ -11,14 +11,10 @@ Usage:
 import argparse
 
 from thegist.commands import fetch
+from thegist.commands import add_ideas
 
 
 def main() -> None:
-    """Parses command line arguments and dispatches to the correct command.
-
-    Creates the top level argument parser, registers all subcommands,
-    and calls the handler function attached to the parsed subcommand.
-    """
     parser = argparse.ArgumentParser(
         prog="thegist",
         description=(
@@ -34,6 +30,7 @@ def main() -> None:
     )
 
     fetch.register(subparsers)
+    add_ideas.register(subparsers)
 
     args = parser.parse_args()
     args.func(args)

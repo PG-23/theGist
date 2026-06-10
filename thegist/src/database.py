@@ -258,6 +258,41 @@ def list_records(subject: str | None = None) -> list[dict]:
     return [_row_to_dict(row) for row in rows]
 
 
+def get_records_without_ideas(subject: str) -> list[dict]:
+    """Returns all records for a subject that have no ideas yet.
+
+    Uses a LEFT JOIN to find records with no matching rows in the
+    ideas table. Used by the add-ideas command to show the user
+    which records still need ideas added.
+
+    Args:
+        subject: The subject name to filter records by.
+
+    Returns:
+        A list of record dictionaries with no associated ideas,
+        ordered by created_at ascending.
+
+    Example:
+        >>> pending = get_records_without_ideas("Age of Empires II")
+        >>> print(len(pending))
+        8
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT records.*
+            FROM records
+            LEFT JOIN ideas ON ideas.record_id = records.id
+            WHERE records.subject = ?
+            AND ideas.id IS NULL
+            ORDER BY records.created_at ASC
+            """,
+            (subject,),
+        ).fetchall()
+
+    return [_row_to_dict(row) for row in rows]
+
+
 # ---------------------------------------------------------------------------
 # Public Interface — Ideas
 # ---------------------------------------------------------------------------
