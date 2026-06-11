@@ -12,7 +12,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 # Root directory of the project, resolved relative to this file
-ROOT_DIR = Path(__file__).parent.resolve()
+ROOT_DIR = Path(__file__).parent.parent.resolve()
 
 # Top level data directory
 DATA_DIR = ROOT_DIR / "data"

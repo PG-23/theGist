@@ -28,7 +28,8 @@ def _fetch_metadata(url: str) -> dict:
         url: The full YouTube video URL.
 
     Returns:
-        A dictionary containing 'title', 'channel', and 'url' keys.
+        A dictionary containing 'title', 'channel', 'url', and
+        'uploaded_at' keys.
 
     Raises:
         ValueError: If the URL is invalid or the video is unavailable.
@@ -37,10 +38,18 @@ def _fetch_metadata(url: str) -> dict:
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
+
+            raw_date = info.get("upload_date")
+            if raw_date and len(raw_date) == 8:
+                uploaded_at = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}"
+            else:
+                uploaded_at = None
+
             return {
                 "title": info.get("title", info.get("id", "unknown")),
                 "channel": info.get("uploader", "Unknown Channel"),
                 "url": url,
+                "uploaded_at": uploaded_at,
             }
     except yt_dlp.utils.DownloadError as e:
         raise ValueError(f"Could not retrieve metadata: {e}")

@@ -5,10 +5,11 @@ It manages two tables — records and ideas — and initializes the
 database automatically on first import.
 
 Public interface:
-    insert_record(title, channel, url, video_id, subject, transcript) -> dict
+    insert_record(title, channel, url, video_id, subject, transcript, uploaded_at) -> dict
     get_record(record_id) -> dict
     get_record_by_video_id(video_id) -> dict | None
     list_records(subject) -> list[dict]
+    get_records_without_ideas(subject) -> list[dict]
     insert_ideas(record_id, texts) -> list[dict]
     get_ideas(record_id) -> list[dict]
     get_ideas_by_subject(subject) -> list[dict]
@@ -35,6 +36,7 @@ CREATE TABLE IF NOT EXISTS records (
     url         TEXT NOT NULL,
     video_id    TEXT NOT NULL UNIQUE,
     subject     TEXT NOT NULL,
+    uploaded_at TEXT,
     transcript  TEXT NOT NULL,
     created_at  TEXT NOT NULL
 );
@@ -119,6 +121,7 @@ def insert_record(
     video_id: str,
     subject: str,
     transcript: str,
+    uploaded_at: str | None = None,
 ) -> dict:
     """Inserts a new video record into the database.
 
@@ -126,25 +129,17 @@ def insert_record(
         title: The YouTube video title.
         channel: The YouTube channel name.
         url: The full YouTube video URL.
-        video_id: The normalized YouTube video ID used for deduplication.
+        video_id: The normalized YouTube video ID for deduplication.
         subject: The subject this video belongs to.
         transcript: The full cleaned transcript text.
+        uploaded_at: The video upload date in YYYY-MM-DD format,
+            or None if unavailable.
 
     Returns:
         The newly created record as a dictionary.
 
     Raises:
         ValueError: If a record with the same video ID already exists.
-
-    Example:
-        >>> record = insert_record(
-        ...     title="Muisca vs Celtas",
-        ...     channel="Hera",
-        ...     url="https://youtube.com/watch?v=abc",
-        ...     video_id="abc",
-        ...     subject="Muisca strategy",
-        ...     transcript="Today we are playing...",
-        ... )
     """
     record = {
         "id": str(uuid.uuid4()),
@@ -153,6 +148,7 @@ def insert_record(
         "url": url,
         "video_id": video_id,
         "subject": subject,
+        "uploaded_at": uploaded_at,
         "transcript": transcript,
         "created_at": _now(),
     }
@@ -163,10 +159,10 @@ def insert_record(
                 """
                 INSERT INTO records
                     (id, title, channel, url, video_id,
-                     subject, transcript, created_at)
+                     subject, uploaded_at, transcript, created_at)
                 VALUES
                     (:id, :title, :channel, :url, :video_id,
-                     :subject, :transcript, :created_at)
+                     :subject, :uploaded_at, :transcript, :created_at)
                 """,
                 record,
             )

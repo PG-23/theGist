@@ -93,7 +93,15 @@ def _read_links(links_file: Path) -> list[str]:
     return urls
 
 
-def _fetch_single(url, subject, succeeded, skipped, failed):
+def _fetch_single(
+    url: str,
+    subject: str,
+    succeeded: list,
+    skipped: list,
+    failed: list,
+) -> None:
+    """Fetches and saves a transcript for a single video URL."""
+
     video_id = extract_video_id(url)
 
     if video_id:
@@ -112,6 +120,7 @@ def _fetch_single(url, subject, succeeded, skipped, failed):
             video_id=video_id or metadata["title"],
             subject=subject,
             transcript=transcript,
+            uploaded_at=metadata.get("uploaded_at"),
         )
         print(f"  ✓ {metadata['title']}")
         succeeded.append(metadata["title"])
