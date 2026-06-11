@@ -1,8 +1,14 @@
 """Database module for theGist.
 
 This module handles all SQLite database interactions for theGist.
-It manages two tables — records and ideas — and initializes the
-database automatically on first import.
+It manages four tables — records, ideas, subject_ideas, and
+duplicate_pairs — and initializes the database automatically
+on first import.
+
+The database is stored as a single file at the path defined in
+config.py. All public functions accept and return plain Python
+dictionaries rather than database row objects to keep the interface
+clean and independent of the database implementation.
 
 Public interface:
     insert_record(title, channel, url, video_id, subject, transcript, uploaded_at) -> dict
@@ -12,7 +18,9 @@ Public interface:
     get_records_without_ideas(subject) -> list[dict]
     insert_ideas(record_id, texts) -> list[dict]
     get_ideas(record_id) -> list[dict]
-    get_ideas_by_subject(subject) -> list[dict]
+    get_active_subject_ideas(subject) -> list[dict]
+    deactivate_subject_idea(idea_id, subject) -> None
+    record_duplicate_pair(kept_id, removed_id, subject, similarity) -> None
     delete_idea(idea_id) -> None
 """
 
@@ -48,6 +56,23 @@ CREATE TABLE IF NOT EXISTS ideas (
     created_at  TEXT NOT NULL,
     FOREIGN KEY (record_id) REFERENCES records (id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS subject_ideas (
+    id          TEXT PRIMARY KEY,
+    idea_id     TEXT NOT NULL,
+    subject     TEXT NOT NULL,
+    is_active   INTEGER NOT NULL DEFAULT 1,
+    FOREIGN KEY (idea_id) REFERENCES ideas (id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS duplicate_pairs (
+    id              TEXT PRIMARY KEY,
+    kept_idea_id    TEXT NOT NULL,
+    removed_idea_id TEXT NOT NULL,
+    subject         TEXT NOT NULL,
+    similarity      REAL NOT NULL,
+    reviewed_at     TEXT NOT NULL
+);
 """
 
 
@@ -81,7 +106,6 @@ def _init_db() -> None:
         conn.executescript(_SCHEMA)
 
 
-# Run on import
 _init_db()
 
 
@@ -140,6 +164,17 @@ def insert_record(
 
     Raises:
         ValueError: If a record with the same video ID already exists.
+
+    Example:
+        >>> record = insert_record(
+        ...     title="Muisca vs Celtas",
+        ...     channel="Hera",
+        ...     url="https://youtube.com/watch?v=abc",
+        ...     video_id="abc",
+        ...     subject="Age of Empires II",
+        ...     transcript="Today we are playing...",
+        ...     uploaded_at="2026-05-29",
+        ... )
     """
     record = {
         "id": str(uuid.uuid4()),
@@ -185,11 +220,6 @@ def get_record(record_id: str) -> dict:
 
     Raises:
         ValueError: If no record with the given ID exists.
-
-    Example:
-        >>> record = get_record("a1b2c3d4-...")
-        >>> print(record["title"])
-        'Muisca vs Celtas'
     """
     with _connect() as conn:
         row = conn.execute(
@@ -205,9 +235,6 @@ def get_record(record_id: str) -> dict:
 
 def get_record_by_video_id(video_id: str) -> dict | None:
     """Retrieves a record by its YouTube video ID.
-
-    Used by the fetch command to check for duplicates before
-    attempting to fetch a transcript regardless of URL format.
 
     Args:
         video_id: The YouTube video ID to look up.
@@ -234,16 +261,15 @@ def list_records(subject: str | None = None) -> list[dict]:
 
     Returns:
         A list of record dictionaries ordered by created_at descending.
-
-    Example:
-        >>> records = list_records("Muisca strategy")
-        >>> print(len(records))
-        5
     """
     with _connect() as conn:
         if subject:
             rows = conn.execute(
-                "SELECT * FROM records WHERE subject = ? ORDER BY created_at DESC",
+                """
+                SELECT * FROM records
+                WHERE subject = ?
+                ORDER BY created_at DESC
+                """,
                 (subject,),
             ).fetchall()
         else:
@@ -258,8 +284,7 @@ def get_records_without_ideas(subject: str) -> list[dict]:
     """Returns all records for a subject that have no ideas yet.
 
     Uses a LEFT JOIN to find records with no matching rows in the
-    ideas table. Used by the add-ideas command to show the user
-    which records still need ideas added.
+    ideas table.
 
     Args:
         subject: The subject name to filter records by.
@@ -267,11 +292,6 @@ def get_records_without_ideas(subject: str) -> list[dict]:
     Returns:
         A list of record dictionaries with no associated ideas,
         ordered by created_at ascending.
-
-    Example:
-        >>> pending = get_records_without_ideas("Age of Empires II")
-        >>> print(len(pending))
-        8
     """
     with _connect() as conn:
         rows = conn.execute(
@@ -296,6 +316,9 @@ def get_records_without_ideas(subject: str) -> list[dict]:
 def insert_ideas(record_id: str, texts: list[str]) -> list[dict]:
     """Inserts a list of key ideas for a given record.
 
+    Automatically populates subject_ideas in the same transaction
+    so the subject pool stays consistent with the ideas table.
+
     Args:
         record_id: The ID of the record to attach ideas to.
         texts: A list of idea text strings to insert. Empty strings
@@ -307,11 +330,6 @@ def insert_ideas(record_id: str, texts: list[str]) -> list[dict]:
     Raises:
         ValueError: If record_id does not exist or texts is empty
             after filtering blank strings.
-
-    Example:
-        >>> ideas = insert_ideas(record_id, ["Cavalry archers have extra range"])
-        >>> print(ideas[0]["text"])
-        'Cavalry archers have extra range'
     """
     filtered = [t.strip() for t in texts if t.strip()]
 
@@ -329,13 +347,43 @@ def insert_ideas(record_id: str, texts: list[str]) -> list[dict]:
         for text in filtered
     ]
 
+    # Build subject_ideas rows using the record's subject
+    subject_idea_rows = []
+
     with _connect() as conn:
+        # Look up the subject from the parent record
+        row = conn.execute(
+            "SELECT subject FROM records WHERE id = ?",
+            (record_id,),
+        ).fetchone()
+
+        if row is None:
+            raise ValueError(f"No record found with id: {record_id}")
+
+        subject = row["subject"]
+
+        # Insert ideas and subject_ideas atomically
         conn.executemany(
             """
             INSERT INTO ideas (id, record_id, text, created_at)
             VALUES (:id, :record_id, :text, :created_at)
             """,
             ideas,
+        )
+
+        for idea in ideas:
+            subject_idea_rows.append({
+                "id": str(uuid.uuid4()),
+                "idea_id": idea["id"],
+                "subject": subject,
+            })
+
+        conn.executemany(
+            """
+            INSERT INTO subject_ideas (id, idea_id, subject, is_active)
+            VALUES (:id, :idea_id, :subject, 1)
+            """,
+            subject_idea_rows,
         )
 
     return ideas
@@ -349,37 +397,35 @@ def get_ideas(record_id: str) -> list[dict]:
 
     Returns:
         A list of idea dictionaries ordered by created_at ascending.
-
-    Example:
-        >>> ideas = get_ideas("a1b2c3d4-...")
-        >>> for idea in ideas:
-        ...     print(idea["text"])
     """
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM ideas WHERE record_id = ? ORDER BY created_at ASC",
+            """
+            SELECT * FROM ideas
+            WHERE record_id = ?
+            ORDER BY created_at ASC
+            """,
             (record_id,),
         ).fetchall()
 
     return [_row_to_dict(row) for row in rows]
 
 
-def get_ideas_by_subject(subject: str) -> list[dict]:
-    """Returns all ideas across all records belonging to a subject.
+def get_active_subject_ideas(subject: str) -> list[dict]:
+    """Returns all active ideas for a subject from the subject pool.
 
-    Joins the ideas and records tables to filter by subject. Used
-    by the dedupe command to find candidate duplicate ideas within
-    a subject.
+    Joins subject_ideas with ideas to return the full idea text
+    alongside record context. Only returns ideas where is_active = 1.
 
     Args:
-        subject: The subject name to retrieve ideas for.
+        subject: The subject name to retrieve active ideas for.
 
     Returns:
-        A list of idea dictionaries each including the parent record's
-        title and channel for display context.
+        A list of idea dictionaries each containing idea id, text,
+        record title, channel, and uploaded_at for context.
 
     Example:
-        >>> ideas = get_ideas_by_subject("Muisca strategy")
+        >>> ideas = get_active_subject_ideas("Age of Empires II")
         >>> print(len(ideas))
         47
     """
@@ -388,20 +434,95 @@ def get_ideas_by_subject(subject: str) -> list[dict]:
             """
             SELECT
                 ideas.id,
-                ideas.record_id,
                 ideas.text,
-                ideas.created_at,
+                ideas.record_id,
                 records.title AS record_title,
-                records.channel
-            FROM ideas
+                records.channel,
+                records.uploaded_at,
+                subject_ideas.id AS subject_idea_id
+            FROM subject_ideas
+            JOIN ideas ON subject_ideas.idea_id = ideas.id
             JOIN records ON ideas.record_id = records.id
-            WHERE records.subject = ?
+            WHERE subject_ideas.subject = ?
+            AND subject_ideas.is_active = 1
             ORDER BY ideas.created_at ASC
             """,
             (subject,),
         ).fetchall()
 
     return [_row_to_dict(row) for row in rows]
+
+
+def deactivate_subject_idea(idea_id: str, subject: str) -> None:
+    """Marks an idea as inactive in the subject pool.
+
+    Does not delete the original idea from the ideas table.
+    The record's original ideas remain intact.
+
+    Args:
+        idea_id: The idea ID to deactivate in the subject pool.
+        subject: The subject the idea belongs to.
+
+    Raises:
+        ValueError: If no matching active subject idea is found.
+    """
+    with _connect() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE subject_ideas
+            SET is_active = 0
+            WHERE idea_id = ?
+            AND subject = ?
+            AND is_active = 1
+            """,
+            (idea_id, subject),
+        )
+
+    if cursor.rowcount == 0:
+        raise ValueError(
+            f"No active subject idea found for idea_id: {idea_id}"
+        )
+
+
+def record_duplicate_pair(
+    kept_idea_id: str,
+    removed_idea_id: str,
+    subject: str,
+    similarity: float,
+) -> None:
+    """Records a duplicate pair decision in the duplicate_pairs table.
+
+    Called when the user chooses to remove one of two similar ideas
+    during a dedupe session. Provides an audit trail for future
+    statistics on per-record content uniqueness.
+
+    Args:
+        kept_idea_id: The ID of the idea that was kept.
+        removed_idea_id: The ID of the idea that was removed.
+        subject: The subject the pair belongs to.
+        similarity: The Jaccard similarity score between the two ideas.
+    """
+    row = {
+        "id": str(uuid.uuid4()),
+        "kept_idea_id": kept_idea_id,
+        "removed_idea_id": removed_idea_id,
+        "subject": subject,
+        "similarity": similarity,
+        "reviewed_at": _now(),
+    }
+
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO duplicate_pairs
+                (id, kept_idea_id, removed_idea_id, subject,
+                 similarity, reviewed_at)
+            VALUES
+                (:id, :kept_idea_id, :removed_idea_id, :subject,
+                 :similarity, :reviewed_at)
+            """,
+            row,
+        )
 
 
 def delete_idea(idea_id: str) -> None:
@@ -412,9 +533,6 @@ def delete_idea(idea_id: str) -> None:
 
     Raises:
         ValueError: If no idea with the given ID exists.
-
-    Example:
-        >>> delete_idea("b2c3d4e5-...")
     """
     with _connect() as conn:
         cursor = conn.execute(
