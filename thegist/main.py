@@ -13,6 +13,7 @@ import argparse
 from thegist.commands import fetch
 from thegist.commands import add_ideas
 from thegist.commands import dedupe
+from thegist.commands import filter_ideas
 
 
 def main() -> None:
@@ -33,6 +34,7 @@ def main() -> None:
     fetch.register(subparsers)
     add_ideas.register(subparsers)
     dedupe.register(subparsers)
+    filter_ideas.register(subparsers)
 
     args = parser.parse_args()
     args.func(args)

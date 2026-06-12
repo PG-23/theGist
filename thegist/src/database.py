@@ -17,6 +17,7 @@ Public interface:
     list_records(subject) -> list[dict]
     get_records_without_ideas(subject) -> list[dict]
     insert_ideas(record_id, texts) -> list[dict]
+    insert_idea_label(idea_id, subject, label) -> None
     get_ideas(record_id) -> list[dict]
     get_active_subject_ideas(subject) -> list[dict]
     deactivate_subject_idea(idea_id, subject) -> None
@@ -62,6 +63,15 @@ CREATE TABLE IF NOT EXISTS subject_ideas (
     idea_id     TEXT NOT NULL,
     subject     TEXT NOT NULL,
     is_active   INTEGER NOT NULL DEFAULT 1,
+    FOREIGN KEY (idea_id) REFERENCES ideas (id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS idea_labels (
+    id          TEXT PRIMARY KEY,
+    idea_id     TEXT NOT NULL,
+    subject     TEXT NOT NULL,
+    label       INTEGER NOT NULL,  -- 1 = relevant, 0 = irrelevant
+    labeled_at  TEXT NOT NULL,
     FOREIGN KEY (idea_id) REFERENCES ideas (id) ON DELETE CASCADE
 );
 
@@ -387,6 +397,48 @@ def insert_ideas(record_id: str, texts: list[str]) -> list[dict]:
         )
 
     return ideas
+
+
+def insert_idea_label(
+    idea_id: str,
+    subject: str,
+    label: int,
+) -> None:
+    """Records a relevance label for an idea.
+
+    Called by filter-ideas when the user marks an idea as relevant
+    or irrelevant. Labels accumulate over time to form a training
+    dataset for a future supervised classifier.
+
+    Args:
+        idea_id: The ID of the idea being labeled.
+        subject: The subject the idea belongs to.
+        label: 1 for relevant, 0 for irrelevant.
+
+    Raises:
+        ValueError: If label is not 0 or 1.
+    """
+    if label not in (0, 1):
+        raise ValueError("Label must be 0 (irrelevant) or 1 (relevant).")
+
+    row = {
+        "id": str(uuid.uuid4()),
+        "idea_id": idea_id,
+        "subject": subject,
+        "label": label,
+        "labeled_at": _now(),
+    }
+
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO idea_labels
+                (id, idea_id, subject, label, labeled_at)
+            VALUES
+                (:id, :idea_id, :subject, :label, :labeled_at)
+            """,
+            row,
+        )
 
 
 def get_ideas(record_id: str) -> list[dict]:
