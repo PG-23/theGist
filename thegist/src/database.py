@@ -23,6 +23,8 @@ Public interface:
     deactivate_subject_idea(idea_id, subject) -> None
     record_duplicate_pair(kept_id, removed_id, subject, similarity) -> None
     delete_idea(idea_id) -> None
+    get_labeled_idea_ids(subject) -> set[str]
+    delete_idea_label(idea_id, subject) -> None
 """
 
 import sqlite3
@@ -594,3 +596,50 @@ def delete_idea(idea_id: str) -> None:
 
     if cursor.rowcount == 0:
         raise ValueError(f"No idea found with id: {idea_id}")
+    
+
+def get_labeled_idea_ids(subject: str) -> set[str]:
+    """Returns the set of idea IDs already labeled for a subject.
+
+    Used by filter-ideas to skip ideas that have already been
+    reviewed in a previous session. Skipped ideas are not labeled
+    so they will reappear in future sessions.
+
+    Args:
+        subject: The subject to retrieve labeled idea IDs for.
+
+    Returns:
+        A set of idea ID strings that have been labeled for
+        the given subject.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT idea_id FROM idea_labels
+            WHERE subject = ?
+            """,
+            (subject,),
+        ).fetchall()
+
+    return {row["idea_id"] for row in rows}
+
+
+def delete_idea_label(idea_id: str, subject: str) -> None:
+    """Removes a label for an idea so it can be relabeled.
+
+    Used by the undo feature in filter-ideas to reverse a labeling
+    decision made earlier in the same session.
+
+    Args:
+        idea_id: The ID of the idea whose label should be removed.
+        subject: The subject the label belongs to.
+    """
+    with _connect() as conn:
+        conn.execute(
+            """
+            DELETE FROM idea_labels
+            WHERE idea_id = ?
+            AND subject = ?
+            """,
+            (idea_id, subject),
+        )

@@ -6,11 +6,13 @@ to the stated subject. The user reviews each flagged idea
 interactively and their decisions are saved as labeled examples
 for future classifier training.
 
-Original record ideas are never modified. Irrelevant ideas are
-marked inactive in the subject_ideas pool.
+Previously labeled ideas are skipped automatically unless --relabel
+is specified. Original record ideas are never modified. Irrelevant
+ideas are marked inactive in the subject_ideas pool.
 
 Usage:
     thegist filter-ideas --subject <subject> [--threshold <float>]
+        [--min-threshold <float>] [--relabel]
 """
 
 import numpy as np
@@ -18,19 +20,14 @@ from sentence_transformers import SentenceTransformer
 
 from thegist.src.database import (
     deactivate_subject_idea,
+    delete_idea_label,
     get_active_subject_ideas,
+    get_labeled_idea_ids,
     insert_idea_label,
 )
 
-# Embedding model — lightweight and effective for semantic similarity
 MODEL_NAME = "all-MiniLM-L6-v2"
-
-# Default similarity threshold below which ideas are flagged
-# Ideas with cosine similarity to the subject reference below this
-# value are considered potentially irrelevant
 DEFAULT_THRESHOLD = 0.25
-
-# Minimum number of active ideas required to run filter-ideas
 MIN_IDEAS = 10
 
 
@@ -47,7 +44,8 @@ def register(subparsers) -> None:
             "Uses sentence embeddings to find ideas that may not be "
             "relevant to the subject. You review each flagged idea "
             "interactively. Decisions are saved as labeled examples "
-            "for future classifier training."
+            "for future classifier training. Previously labeled ideas "
+            "are skipped unless --relabel is specified."
         ),
     )
     parser.add_argument(
@@ -61,9 +59,7 @@ def register(subparsers) -> None:
         type=float,
         default=DEFAULT_THRESHOLD,
         help=(
-            f"Similarity threshold between 0.0 and 1.0. Ideas with "
-            f"cosine similarity to the subject below this value are "
-            f"flagged. Lower values flag fewer ideas. "
+            f"Upper similarity bound. Ideas below this value are flagged. "
             f"Default is {DEFAULT_THRESHOLD}."
         ),
     )
@@ -72,11 +68,17 @@ def register(subparsers) -> None:
         type=float,
         default=0.0,
         help=(
-            "Lower bound of the similarity range to review. "
-            "Only ideas with similarity at or above this value and below "
-            "--threshold are flagged. Defaults to 0.0 to show all ideas "
-            "below --threshold. Use this to review only new candidates "
-            "when increasing the threshold from a previous session."
+            "Lower similarity bound. Only ideas at or above this value "
+            "and below --threshold are flagged. Defaults to 0.0."
+        ),
+    )
+    parser.add_argument(
+        "--relabel",
+        action="store_true",
+        default=False,
+        help=(
+            "Include previously labeled ideas in the review session. "
+            "Use this to revisit and correct earlier decisions."
         ),
     )
     parser.set_defaults(func=run)
@@ -102,10 +104,9 @@ def _build_reference_embedding(
 ) -> np.ndarray:
     """Builds a reference embedding for the subject.
 
-    The reference embedding represents what relevant ideas for this
-    subject should semantically look like. It is the centroid of
-    several descriptive phrases about the subject to give a more
-    robust representation than a single phrase.
+    Encodes several descriptive phrases about the subject and
+    averages them into a centroid to form a robust reference
+    representation.
 
     Args:
         model: The loaded SentenceTransformer model.
@@ -124,12 +125,9 @@ def _build_reference_embedding(
 
     embeddings = model.encode(reference_phrases, normalize_embeddings=True)
     centroid = np.mean(embeddings, axis=0)
-
-    # Normalize the centroid
     norm = np.linalg.norm(centroid)
     if norm > 0:
         centroid = centroid / norm
-
     return centroid
 
 
@@ -146,15 +144,12 @@ def _compute_similarities(
         reference: The normalized reference embedding array.
 
     Returns:
-        A list of (idea, similarity) tuples sorted by similarity
-        ascending so the least relevant ideas appear first.
+        A list of (idea, similarity) tuples sorted ascending by
+        similarity so the least relevant ideas appear first.
     """
     texts = [idea["text"] for idea in ideas]
     embeddings = model.encode(texts, normalize_embeddings=True)
-
-    # Cosine similarity is dot product of normalized vectors
     similarities = embeddings @ reference
-
     pairs = list(zip(ideas, similarities.tolist()))
     pairs.sort(key=lambda x: x[1])
     return pairs
@@ -164,25 +159,32 @@ def _flag_candidates(
     pairs: list[tuple[dict, float]],
     threshold: float,
     min_threshold: float = 0.0,
+    labeled_ids: set[str] = None,
+    relabel: bool = False,
 ) -> list[tuple[dict, float]]:
-    """Returns ideas with similarity within the specified range.
+    """Returns ideas within the similarity range that need labeling.
+
+    Excludes previously labeled ideas unless relabel is True.
 
     Args:
         pairs: List of (idea, similarity) tuples.
-        threshold: The upper bound — ideas below this are flagged.
-        min_threshold: The lower bound — ideas at or above this
-            are included. Defaults to 0.0 to include all ideas
-            below threshold.
+        threshold: Upper bound — ideas below this are flagged.
+        min_threshold: Lower bound — ideas at or above this included.
+        labeled_ids: Set of idea IDs already labeled this subject.
+        relabel: If True include previously labeled ideas.
 
     Returns:
-        A filtered list of (idea, similarity) tuples where similarity
-        is at or above min_threshold and below threshold.
+        A filtered list of (idea, similarity) tuples.
     """
-    return [
-        (idea, sim)
-        for idea, sim in pairs
-        if min_threshold <= sim < threshold
-    ]
+    labeled_ids = labeled_ids or set()
+    results = []
+    for idea, sim in pairs:
+        if sim < min_threshold or sim >= threshold:
+            continue
+        if not relabel and idea["id"] in labeled_ids:
+            continue
+        results.append((idea, sim))
+    return results
 
 
 def _display_candidate(
@@ -190,6 +192,7 @@ def _display_candidate(
     similarity: float,
     index: int,
     total: int,
+    is_first: bool,
 ) -> None:
     """Prints a flagged idea for the user to review.
 
@@ -198,6 +201,7 @@ def _display_candidate(
         similarity: The cosine similarity score to the subject.
         index: The current candidate number in the session.
         total: Total number of flagged candidates.
+        is_first: Whether this is the first candidate in the session.
     """
     print(f"\n{'-' * 60}")
     print(f"Candidate {index} of {total}  (relevance: {similarity:.2f})\n")
@@ -208,25 +212,43 @@ def _display_candidate(
     print()
 
 
-def _ask_relevance() -> str:
+def _ask_action(is_first: bool) -> str:
     """Prompts the user to classify a flagged idea.
 
+    Undo is disabled for the first candidate since there is nothing
+    to undo yet.
+
+    Args:
+        is_first: Whether this is the first candidate in the session.
+
     Returns:
-        One of 'keep', 'remove', or 'skip'.
+        One of 'keep', 'remove', 'skip', or 'undo'.
     """
-    valid = {"k", "keep", "r", "remove", "s", "skip", ""}
+    if is_first:
+        prompt = "Action? [K]eep / [R]emove / [S]kip (default: Keep): "
+        valid_undo = False
+    else:
+        prompt = (
+            "Action? [K]eep / [R]emove / [S]kip / [U]ndo previous "
+            "(default: Keep): "
+        )
+        valid_undo = True
+
     while True:
-        raw = input(
-            "Action? [K]eep / [R]emove / [S]kip (default: Keep): "
-        ).strip().lower()
-        if raw in valid:
-            if raw in ("", "k", "keep"):
-                return "keep"
-            if raw in ("r", "remove"):
-                return "remove"
-            if raw in ("s", "skip"):
-                return "skip"
-        print("  Please enter K, R, or S.")
+        raw = input(prompt).strip().lower()
+        if raw in ("", "k", "keep"):
+            return "keep"
+        if raw in ("r", "remove"):
+            return "remove"
+        if raw in ("s", "skip"):
+            return "skip"
+        if valid_undo and raw in ("u", "undo"):
+            return "undo"
+        if not valid_undo and raw in ("u", "undo"):
+            print("  Nothing to undo yet.")
+        else:
+            options = "K, R, S, or U" if valid_undo else "K, R, or S"
+            print(f"  Please enter {options}.")
 
 
 def _apply_decision(
@@ -237,14 +259,10 @@ def _apply_decision(
 ) -> None:
     """Applies the user's relevance decision to an idea.
 
-    Saves the label to the database regardless of decision for
-    future classifier training. Deactivates the idea in the subject
-    pool if marked irrelevant.
-
     Args:
         idea: The idea dictionary being reviewed.
         subject: The subject the idea belongs to.
-        decision: One of 'keep', 'remove', or 'skip'.
+        decision: One of 'keep' or 'remove'.
         stats: The session statistics dictionary to update.
     """
     if decision == "keep":
@@ -258,9 +276,51 @@ def _apply_decision(
         print("  → Marked as irrelevant and removed from subject pool.")
         stats["removed"] += 1
 
-    elif decision == "skip":
-        print("  → Skipped. No label recorded.")
-        stats["skipped"] += 1
+
+def _undo_decision(
+    prev_idea: dict,
+    prev_decision: str,
+    subject: str,
+    stats: dict,
+) -> None:
+    """Reverses the previous labeling decision.
+
+    Restores the idea to active in subject_ideas if it was removed
+    and deletes its label from idea_labels.
+
+    Args:
+        prev_idea: The idea dictionary from the previous decision.
+        prev_decision: The decision that was made — 'keep' or 'remove'.
+        subject: The subject the idea belongs to.
+        stats: The session statistics dictionary to update.
+    """
+    delete_idea_label(prev_idea["id"], subject)
+
+    if prev_decision == "remove":
+        # Restore the idea to active in the subject pool
+        from thegist.src.database import _connect
+        with _connect() as conn:
+            conn.execute(
+                """
+                UPDATE subject_ideas
+                SET is_active = 1
+                WHERE idea_id = ?
+                AND subject = ?
+                """,
+                (prev_idea["id"], subject),
+            )
+        stats["removed"] -= 1
+        print(
+            f"  → Undone. '{prev_idea['text'][:50]}' "
+            f"restored to active pool."
+        )
+
+    elif prev_decision == "keep":
+        stats["kept"] -= 1
+        print(
+            f"  → Undone. Label removed for "
+            f"'{prev_idea['text'][:50]}'."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -270,25 +330,34 @@ def _apply_decision(
 def run(args) -> None:
     """Executes the filter-ideas command.
 
-    Loads active subject ideas, computes embedding similarity to the
-    subject reference, flags candidates below the threshold, and
-    guides the user through an interactive review session.
+    Loads active subject ideas, computes embedding similarity,
+    flags candidates in the specified range that have not been
+    labeled yet, and guides the user through an interactive
+    review session with undo support.
 
     Args:
-        args: Parsed argument namespace containing subject and threshold.
+        args: Parsed argument namespace containing subject,
+            threshold, min_threshold, and relabel.
     """
     subject = args.subject
     threshold = args.threshold
+    min_threshold = args.min_threshold
+    relabel = args.relabel
 
     if not 0.0 < threshold < 1.0:
-        print("\nError: --threshold must be between 0.0 and 1.0 exclusive.\n")
+        print("\nError: --threshold must be between 0.0 and 1.0.\n")
+        return
+
+    if min_threshold >= threshold:
+        print(
+            "\nError: --min-threshold must be less than --threshold.\n"
+        )
         return
 
     ideas = get_active_subject_ideas(subject)
 
     if not ideas:
-        print(f"\nNo active ideas found for subject: {subject}")
-        print("Run add-ideas first to populate the subject pool.\n")
+        print(f"\nNo active ideas found for subject: {subject}\n")
         return
 
     if len(ideas) < MIN_IDEAS:
@@ -298,13 +367,19 @@ def run(args) -> None:
         )
         return
 
+    labeled_ids = set() if relabel else get_labeled_idea_ids(subject)
+
     print(f"\ntheGist — Filter Ideas")
     print(f"Subject   : {subject}")
     print(f"Ideas     : {len(ideas)}")
-    if args.min_threshold > 0.0:
-        print(f"Range     : {args.min_threshold} — {threshold}")
+    if min_threshold > 0.0:
+        print(f"Range     : {min_threshold} — {threshold}")
     else:
         print(f"Threshold : {threshold}")
+    if relabel:
+        print(f"Mode      : Relabel (includes previously labeled ideas)")
+    if labeled_ids:
+        print(f"Already labeled: {len(labeled_ids)} idea(s) will be skipped")
     print()
 
     model = _load_model()
@@ -312,17 +387,20 @@ def run(args) -> None:
 
     print("Computing similarities...")
     pairs = _compute_similarities(model, ideas, reference)
-    candidates = _flag_candidates(pairs, threshold, args.min_threshold)
+    candidates = _flag_candidates(
+        pairs, threshold, min_threshold, labeled_ids, relabel
+    )
 
     if not candidates:
         print(
-            f"\nNo ideas flagged below threshold {threshold}. "
-            f"All ideas appear relevant to: {subject}\n"
-            f"Try raising the threshold to flag more candidates.\n"
+            f"\nNo unlabeled ideas found in the specified range. "
+            f"All candidates have already been reviewed.\n"
+            f"Use --relabel to revisit previous decisions or "
+            f"adjust --threshold to find new candidates.\n"
         )
         return
 
-    print(f"Found {len(candidates)} candidate(s) to review.\n")
+    print(f"Found {len(candidates)} unlabeled candidate(s) to review.\n")
 
     stats = {
         "kept": 0,
@@ -330,10 +408,38 @@ def run(args) -> None:
         "skipped": 0,
     }
 
-    for i, (idea, similarity) in enumerate(candidates, start=1):
-        _display_candidate(idea, similarity, i, len(candidates))
-        decision = _ask_relevance()
-        _apply_decision(idea, subject, decision, stats)
+    # Track the previous decision for undo support
+    prev_idea = None
+    prev_decision = None
+
+    i = 0
+    while i < len(candidates):
+        idea, similarity = candidates[i]
+        is_first = prev_idea is None
+
+        _display_candidate(idea, similarity, i + 1, len(candidates), is_first)
+        action = _ask_action(is_first)
+
+        if action == "undo":
+            _undo_decision(prev_idea, prev_decision, subject, stats)
+            # Step back to re-display the previous candidate
+            i -= 1
+            prev_idea = None
+            prev_decision = None
+            continue
+
+        if action in ("keep", "remove"):
+            _apply_decision(idea, subject, action, stats)
+            prev_idea = idea
+            prev_decision = action
+        else:
+            # skip
+            print("  → Skipped.")
+            stats["skipped"] += 1
+            prev_idea = None
+            prev_decision = None
+
+        i += 1
 
     print(f"\n{'-' * 60}")
     print(f"\nFilter session complete.\n")
