@@ -25,6 +25,7 @@ Public interface:
     delete_idea(idea_id) -> None
     get_labeled_idea_ids(subject) -> set[str]
     delete_idea_label(idea_id, subject) -> None
+    get_labeled_examples(subject) -> list[dict]
 """
 
 import sqlite3
@@ -643,3 +644,39 @@ def delete_idea_label(idea_id: str, subject: str) -> None:
             """,
             (idea_id, subject),
         )
+
+
+def get_labeled_examples(subject: str) -> list[dict]:
+    """Returns all labeled ideas for a subject for classifier training.
+
+    Joins idea_labels with ideas to return the full idea text
+    alongside its label for use as training data.
+
+    Args:
+        subject: The subject to retrieve labeled examples for.
+
+    Returns:
+        A list of dictionaries each containing 'idea_id', 'text',
+        and 'label' keys. Label is 1 for relevant, 0 for irrelevant.
+
+    Example:
+        >>> examples = get_labeled_examples("Age of Empires II")
+        >>> print(len(examples))
+        646
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                idea_labels.idea_id,
+                idea_labels.label,
+                ideas.text
+            FROM idea_labels
+            JOIN ideas ON idea_labels.idea_id = ideas.id
+            WHERE idea_labels.subject = ?
+            ORDER BY idea_labels.labeled_at ASC
+            """,
+            (subject,),
+        ).fetchall()
+
+    return [_row_to_dict(row) for row in rows]

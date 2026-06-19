@@ -17,6 +17,7 @@ Usage:
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
+from thegist.src.classifier import model_exists, predict_irrelevance
 
 from thegist.src.database import (
     deactivate_subject_idea,
@@ -27,7 +28,7 @@ from thegist.src.database import (
 )
 
 MODEL_NAME = "all-MiniLM-L6-v2"
-DEFAULT_THRESHOLD = 0.25
+DEFAULT_THRESHOLD = 0.5
 MIN_IDEAS = 10
 
 
@@ -57,10 +58,13 @@ def register(subparsers) -> None:
     parser.add_argument(
         "--threshold",
         type=float,
-        default=DEFAULT_THRESHOLD,
+        default=0.5,
         help=(
-            f"Upper similarity bound. Ideas below this value are flagged. "
-            f"Default is {DEFAULT_THRESHOLD}."
+            "When a trained classifier exists: minimum irrelevance "
+            "probability to flag an idea (default 0.5). "
+            "When using embedding similarity: maximum similarity "
+            "score to flag an idea (default 0.25). "
+            "Adjust based on how aggressively you want to filter."
         ),
     )
     parser.add_argument(
@@ -189,22 +193,18 @@ def _flag_candidates(
 
 def _display_candidate(
     idea: dict,
-    similarity: float,
+    score: float,
     index: int,
     total: int,
-    is_first: bool,
+    mode: str,
 ) -> None:
-    """Prints a flagged idea for the user to review.
-
-    Args:
-        idea: The idea dictionary to display.
-        similarity: The cosine similarity score to the subject.
-        index: The current candidate number in the session.
-        total: Total number of flagged candidates.
-        is_first: Whether this is the first candidate in the session.
-    """
+    """Prints a flagged idea for the user to review."""
+    score_label = (
+        "irrelevance probability" if mode == "classifier"
+        else "relevance score"
+    )
     print(f"\n{'-' * 60}")
-    print(f"Candidate {index} of {total}  (relevance: {similarity:.2f})\n")
+    print(f"Candidate {index} of {total}  ({score_label}: {score:.2f})\n")
     print(f"  Idea   : {idea['text']}")
     print(f"  From   : {idea['record_title']} | {idea['channel']}")
     if idea.get("uploaded_at"):
@@ -323,6 +323,30 @@ def _undo_decision(
         )
 
 
+def _score_with_classifier(
+    ideas: list[dict],
+    subject: str,
+) -> list[tuple[dict, float]]:
+    """Scores ideas using the trained relevance classifier.
+
+    Returns ideas sorted by irrelevance probability descending
+    so the most likely irrelevant ideas are reviewed first.
+
+    Args:
+        ideas: List of active subject idea dictionaries.
+        subject: The subject to load the classifier for.
+
+    Returns:
+        A list of (idea, irrelevance_probability) tuples sorted
+        by probability descending.
+    """
+    texts = [idea["text"] for idea in ideas]
+    probabilities = predict_irrelevance(texts, subject)
+    pairs = list(zip(ideas, probabilities))
+    pairs.sort(key=lambda x: x[1], reverse=True)
+    return pairs
+
+
 # ---------------------------------------------------------------------------
 # Public Interface
 # ---------------------------------------------------------------------------
@@ -330,9 +354,10 @@ def _undo_decision(
 def run(args) -> None:
     """Executes the filter-ideas command.
 
-    Loads active subject ideas, computes embedding similarity,
-    flags candidates in the specified range that have not been
-    labeled yet, and guides the user through an interactive
+    Loads active subject ideas and scores them either using a trained
+    classifier (if available) or embedding similarity to the subject
+    reference. Flags candidates in the specified range that have not
+    been labeled yet, and guides the user through an interactive
     review session with undo support.
 
     Args:
@@ -376,24 +401,42 @@ def run(args) -> None:
         print(f"Range     : {min_threshold} — {threshold}")
     else:
         print(f"Threshold : {threshold}")
+    print(f"Mode      : {'Classifier' if model_exists(subject) else 'Embedding similarity'}")
     if relabel:
-        print(f"Mode      : Relabel (includes previously labeled ideas)")
+        print(f"Relabel   : Yes (includes previously labeled ideas)")
     if labeled_ids:
         print(f"Already labeled: {len(labeled_ids)} idea(s) will be skipped")
     print()
 
-    model = _load_model()
-    reference = _build_reference_embedding(model, subject)
-
-    print("Computing similarities...")
-    pairs = _compute_similarities(model, ideas, reference)
-    candidates = _flag_candidates(
-        pairs, threshold, min_threshold, labeled_ids, relabel
-    )
+    # Use trained classifier if available, otherwise fall back
+    # to embedding similarity
+    if model_exists(subject) and not relabel:
+        print("Using trained classifier for scoring...\n")
+        pairs = _score_with_classifier(ideas, subject)
+        # With classifier, threshold means irrelevance probability
+        # Flip the comparison — flag ideas ABOVE threshold
+        candidates = [
+            (idea, score)
+            for idea, score in pairs
+            if score >= threshold
+            and (idea["id"] not in labeled_ids)
+        ]
+        mode = "classifier"
+    else:
+        if not model_exists(subject):
+            print("No trained model found. Using embedding similarity.\n")
+        model = _load_model()
+        reference = _build_reference_embedding(model, subject)
+        print("Computing similarities...\n")
+        pairs = _compute_similarities(model, ideas, reference)
+        candidates = _flag_candidates(
+            pairs, threshold, min_threshold, labeled_ids, relabel
+        )
+        mode = "embedding"
 
     if not candidates:
         print(
-            f"\nNo unlabeled ideas found in the specified range. "
+            f"\nNo unlabeled ideas found matching the criteria. "
             f"All candidates have already been reviewed.\n"
             f"Use --relabel to revisit previous decisions or "
             f"adjust --threshold to find new candidates.\n"
@@ -414,15 +457,14 @@ def run(args) -> None:
 
     i = 0
     while i < len(candidates):
-        idea, similarity = candidates[i]
+        idea, score = candidates[i]
         is_first = prev_idea is None
 
-        _display_candidate(idea, similarity, i + 1, len(candidates), is_first)
+        _display_candidate(idea, score, i + 1, len(candidates), mode)
         action = _ask_action(is_first)
 
         if action == "undo":
             _undo_decision(prev_idea, prev_decision, subject, stats)
-            # Step back to re-display the previous candidate
             i -= 1
             prev_idea = None
             prev_decision = None
