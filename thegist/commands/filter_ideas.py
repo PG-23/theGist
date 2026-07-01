@@ -77,6 +77,18 @@ def register(subparsers) -> None:
         ),
     )
     parser.add_argument(
+        "--auto-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Optional. When using a trained classifier, ideas with "
+            "irrelevance probability at or above this value are "
+            "automatically removed without interactive review. "
+            "Must be higher than --threshold. Only available in "
+            "classifier mode."
+        ),
+    )
+    parser.add_argument(
         "--relabel",
         action="store_true",
         default=False,
@@ -443,7 +455,50 @@ def run(args) -> None:
         )
         return
 
-    print(f"Found {len(candidates)} unlabeled candidate(s) to review.\n")
+    # Split into auto-removed and interactive groups if auto-threshold set
+    auto_removed = []
+    if args.auto_threshold is not None and mode == "classifier":
+        if args.auto_threshold <= threshold:
+            print(
+                "\nError: --auto-threshold must be greater than --threshold.\n"
+            )
+            return
+
+        interactive_candidates = []
+        for idea, score in candidates:
+            if score >= args.auto_threshold:
+                deactivate_subject_idea(idea["id"], subject)
+                insert_idea_label(idea["id"], subject, label=0)
+                auto_removed.append((idea, score))
+            else:
+                interactive_candidates.append((idea, score))
+
+        candidates = interactive_candidates
+
+        if auto_removed:
+            print(
+                f"Automatically removed {len(auto_removed)} idea(s) "
+                f"with irrelevance probability >= {args.auto_threshold}\n"
+            )
+            print(f"Auto-removed ideas (for review):")
+            for idea, score in auto_removed:
+                print(f"  [{score:.2f}] {idea['text'][:70]}")
+            print()
+
+    if not candidates and not auto_removed:
+        print("No candidates to review.\n")
+        return
+
+    if not candidates:
+        print("All candidates were automatically removed.\n")
+        # Skip straight to summary
+        print(f"\n{'-' * 60}")
+        print(f"\nFilter session complete.\n")
+        print(f"  Auto-removed : {len(auto_removed)} idea(s)")
+        print(f"  Labels saved for training : {len(auto_removed)}\n")
+        return
+
+    print(f"Found {len(candidates)} unlabeled candidate(s) to review interactively.\n")
 
     stats = {
         "kept": 0,
@@ -482,12 +537,14 @@ def run(args) -> None:
             prev_decision = None
 
         i += 1
-
+    
     print(f"\n{'-' * 60}")
     print(f"\nFilter session complete.\n")
-    print(f"  Reviewed : {len(candidates)} idea(s)")
-    print(f"  Kept     : {stats['kept']}")
-    print(f"  Removed  : {stats['removed']}")
-    print(f"  Skipped  : {stats['skipped']}")
-    total_labels = stats["kept"] + stats["removed"]
+    if auto_removed:
+        print(f"  Auto-removed     : {len(auto_removed)} idea(s)")
+    print(f"  Reviewed         : {len(candidates)} idea(s)")
+    print(f"  Kept             : {stats['kept']}")
+    print(f"  Removed          : {stats['removed']}")
+    print(f"  Skipped          : {stats['skipped']}")
+    total_labels = stats["kept"] + stats["removed"] + len(auto_removed)
     print(f"  Labels saved for training : {total_labels}\n")
