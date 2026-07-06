@@ -15,6 +15,8 @@ from thegist.commands import add_ideas
 from thegist.commands import dedupe
 from thegist.commands import filter_ideas
 from thegist.commands import train
+from thegist.commands import add_category
+from thegist.commands import categorize
 
 
 def main() -> None:
@@ -37,6 +39,8 @@ def main() -> None:
     dedupe.register(subparsers)
     filter_ideas.register(subparsers)
     train.register(subparsers)
+    add_category.register(subparsers)
+    categorize.register(subparsers)
 
     args = parser.parse_args()
     args.func(args)

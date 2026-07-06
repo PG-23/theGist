@@ -26,6 +26,14 @@ Public interface:
     get_labeled_idea_ids(subject) -> set[str]
     delete_idea_label(idea_id, subject) -> None
     get_labeled_examples(subject) -> list[dict]
+    insert_category(subject, name, description) -> dict
+    get_categories(subject) -> list[dict]
+    get_category_by_name(subject, name) -> dict | None
+    assign_idea_category(idea_id, category_id) -> None
+    get_uncategorized_ideas(subject) -> list[dict]
+    get_other_ideas(subject, other_category_id) -> list[dict]
+    get_all_categorized_ideas(subject) -> list[dict]
+    get_ideas_by_category(subject, category_name) -> list[dict]
 """
 
 import sqlite3
@@ -69,15 +77,6 @@ CREATE TABLE IF NOT EXISTS subject_ideas (
     FOREIGN KEY (idea_id) REFERENCES ideas (id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS idea_labels (
-    id          TEXT PRIMARY KEY,
-    idea_id     TEXT NOT NULL,
-    subject     TEXT NOT NULL,
-    label       INTEGER NOT NULL,  -- 1 = relevant, 0 = irrelevant
-    labeled_at  TEXT NOT NULL,
-    FOREIGN KEY (idea_id) REFERENCES ideas (id) ON DELETE CASCADE
-);
-
 CREATE TABLE IF NOT EXISTS duplicate_pairs (
     id              TEXT PRIMARY KEY,
     kept_idea_id    TEXT NOT NULL,
@@ -85,6 +84,32 @@ CREATE TABLE IF NOT EXISTS duplicate_pairs (
     subject         TEXT NOT NULL,
     similarity      REAL NOT NULL,
     reviewed_at     TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS idea_labels (
+    id          TEXT PRIMARY KEY,
+    idea_id     TEXT NOT NULL,
+    subject     TEXT NOT NULL,
+    label       INTEGER NOT NULL,
+    labeled_at  TEXT NOT NULL,
+    FOREIGN KEY (idea_id) REFERENCES ideas (id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS categories (
+    id          TEXT PRIMARY KEY,
+    subject     TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    UNIQUE(subject, name)
+);
+
+CREATE TABLE IF NOT EXISTS idea_categories (
+    idea_id     TEXT PRIMARY KEY,
+    category_id TEXT NOT NULL,
+    assigned_at TEXT NOT NULL,
+    FOREIGN KEY (idea_id) REFERENCES ideas (id) ON DELETE CASCADE,
+    FOREIGN KEY (category_id) REFERENCES categories (id) ON DELETE CASCADE
 );
 """
 
@@ -677,6 +702,285 @@ def get_labeled_examples(subject: str) -> list[dict]:
             ORDER BY idea_labels.labeled_at ASC
             """,
             (subject,),
+        ).fetchall()
+
+    return [_row_to_dict(row) for row in rows]
+
+# ---------------------------------------------------------------------------
+# Public Interface — Categories
+# ---------------------------------------------------------------------------
+
+def insert_category(
+    subject: str,
+    name: str,
+    description: str,
+) -> dict:
+    """Inserts a new category for a subject.
+
+    Args:
+        subject: The subject this category belongs to.
+        name: The display name of the category.
+        description: A description of what ideas belong in this
+            category. Used for embedding similarity suggestions.
+
+    Returns:
+        The newly created category as a dictionary.
+
+    Raises:
+        ValueError: If a category with the same name already exists
+            for this subject.
+
+    Example:
+        >>> cat = insert_category(
+        ...     "Age of Empires II",
+        ...     "Resource Management",
+        ...     "food wood gold stone economy...",
+        ... )
+    """
+    category = {
+        "id": str(uuid.uuid4()),
+        "subject": subject,
+        "name": name,
+        "description": description,
+        "created_at": _now(),
+    }
+
+    try:
+        with _connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO categories
+                    (id, subject, name, description, created_at)
+                VALUES
+                    (:id, :subject, :name, :description, :created_at)
+                """,
+                category,
+            )
+    except sqlite3.IntegrityError:
+        raise ValueError(
+            f"Category '{name}' already exists for subject: {subject}"
+        )
+
+    return category
+
+
+def get_categories(subject: str) -> list[dict]:
+    """Returns all categories for a subject.
+
+    Args:
+        subject: The subject to retrieve categories for.
+
+    Returns:
+        A list of category dictionaries ordered by name ascending.
+
+    Example:
+        >>> cats = get_categories("Age of Empires II")
+        >>> for c in cats:
+        ...     print(c["name"])
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM categories
+            WHERE subject = ?
+            ORDER BY name ASC
+            """,
+            (subject,),
+        ).fetchall()
+
+    return [_row_to_dict(row) for row in rows]
+
+
+def get_category_by_name(subject: str, name: str) -> dict | None:
+    """Retrieves a category by its name and subject.
+
+    Args:
+        subject: The subject the category belongs to.
+        name: The category name to look up.
+
+    Returns:
+        The category dictionary if found, or None.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM categories
+            WHERE subject = ?
+            AND name = ?
+            """,
+            (subject, name),
+        ).fetchone()
+
+    return _row_to_dict(row) if row else None
+
+
+def assign_idea_category(idea_id: str, category_id: str) -> None:
+    """Assigns a category to an idea.
+
+    Inserts a new row into idea_categories. If the idea already
+    has a category assigned it is replaced via upsert.
+
+    Args:
+        idea_id: The ID of the idea to assign.
+        category_id: The ID of the category to assign to.
+    """
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO idea_categories (idea_id, category_id, assigned_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(idea_id) DO UPDATE SET
+                category_id = excluded.category_id,
+                assigned_at = excluded.assigned_at
+            """,
+            (idea_id, category_id, _now()),
+        )
+
+
+def get_uncategorized_ideas(subject: str) -> list[dict]:
+    """Returns all active ideas for a subject with no category assigned.
+
+    Args:
+        subject: The subject to retrieve uncategorized ideas for.
+
+    Returns:
+        A list of idea dictionaries with no category assignment,
+        ordered by created_at ascending.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                ideas.id,
+                ideas.text,
+                ideas.record_id,
+                records.title AS record_title,
+                records.channel,
+                records.uploaded_at
+            FROM subject_ideas
+            JOIN ideas ON subject_ideas.idea_id = ideas.id
+            JOIN records ON ideas.record_id = records.id
+            LEFT JOIN idea_categories ON ideas.id = idea_categories.idea_id
+            WHERE subject_ideas.subject = ?
+            AND subject_ideas.is_active = 1
+            AND idea_categories.idea_id IS NULL
+            ORDER BY ideas.created_at ASC
+            """,
+            (subject,),
+        ).fetchall()
+
+    return [_row_to_dict(row) for row in rows]
+
+
+def get_other_ideas(subject: str, other_category_id: str) -> list[dict]:
+    """Returns all active ideas currently assigned to the Other category.
+
+    Args:
+        subject: The subject to query.
+        other_category_id: The ID of the Other category.
+
+    Returns:
+        A list of idea dictionaries assigned to Other, ordered
+        by created_at ascending.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                ideas.id,
+                ideas.text,
+                ideas.record_id,
+                records.title AS record_title,
+                records.channel,
+                records.uploaded_at
+            FROM subject_ideas
+            JOIN ideas ON subject_ideas.idea_id = ideas.id
+            JOIN records ON ideas.record_id = records.id
+            JOIN idea_categories ON ideas.id = idea_categories.idea_id
+            WHERE subject_ideas.subject = ?
+            AND subject_ideas.is_active = 1
+            AND idea_categories.category_id = ?
+            ORDER BY ideas.created_at ASC
+            """,
+            (subject, other_category_id),
+        ).fetchall()
+
+    return [_row_to_dict(row) for row in rows]
+
+
+def get_all_categorized_ideas(subject: str) -> list[dict]:
+    """Returns all active categorized ideas for a subject.
+
+    Used by the categorize --all flag to re-evaluate all ideas
+    regardless of their current category assignment.
+
+    Args:
+        subject: The subject to retrieve ideas for.
+
+    Returns:
+        A list of idea dictionaries each including their current
+        category name, ordered by created_at ascending.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                ideas.id,
+                ideas.text,
+                ideas.record_id,
+                records.title AS record_title,
+                records.channel,
+                records.uploaded_at,
+                categories.name AS current_category
+            FROM subject_ideas
+            JOIN ideas ON subject_ideas.idea_id = ideas.id
+            JOIN records ON ideas.record_id = records.id
+            LEFT JOIN idea_categories ON ideas.id = idea_categories.idea_id
+            LEFT JOIN categories ON idea_categories.category_id = categories.id
+            WHERE subject_ideas.subject = ?
+            AND subject_ideas.is_active = 1
+            ORDER BY ideas.created_at ASC
+            """,
+            (subject,),
+        ).fetchall()
+
+    return [_row_to_dict(row) for row in rows]
+
+
+def get_ideas_by_category(
+    subject: str,
+    category_name: str,
+) -> list[dict]:
+    """Returns all active ideas assigned to a specific category.
+
+    Args:
+        subject: The subject to query.
+        category_name: The name of the category to filter by.
+
+    Returns:
+        A list of idea dictionaries assigned to that category.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                ideas.id,
+                ideas.text,
+                ideas.record_id,
+                records.title AS record_title,
+                records.channel,
+                records.uploaded_at
+            FROM subject_ideas
+            JOIN ideas ON subject_ideas.idea_id = ideas.id
+            JOIN records ON ideas.record_id = records.id
+            JOIN idea_categories ON ideas.id = idea_categories.idea_id
+            JOIN categories ON idea_categories.category_id = categories.id
+            WHERE subject_ideas.subject = ?
+            AND categories.name = ?
+            AND subject_ideas.is_active = 1
+            ORDER BY ideas.created_at ASC
+            """,
+            (subject, category_name),
         ).fetchall()
 
     return [_row_to_dict(row) for row in rows]
